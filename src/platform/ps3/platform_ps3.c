@@ -18,7 +18,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <net/net.h>
-#include <net/select.h>
+#include <net/poll.h>
 #include <rsx/rsx.h>
 #include <sysutil/video.h>
 #include <sysutil/sysutil.h>
@@ -145,9 +145,11 @@ int plat_init(const plat_options *opt) {
     if (once) { compute_grid(); return 0; }
     once = 1;
     if (!g_log) g_log = fopen("/dev_hdd0/tmp/avatar_chat_ps3.log", "a");
+    plat_log("--- avatar_chat_ps3 starting, base %s", g_base);
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sysutil_cb, NULL);
     if (init_video() != 0) { plat_log("video init failed"); return -1; }
     compute_grid();
+    plat_log("video %ux%u, scale %d, %dx%d cells", (unsigned)g_res.width, (unsigned)g_res.height, g_scale, g_cols, g_rows);
     ioPadInit(7);
     ioKbInit(MAX_KEYBOARDS);
     memset(&padinfo, 0, sizeof padinfo);
@@ -363,34 +365,46 @@ int net_connect(const char *host, int port, char *err, size_t errcap) {
         memcpy(&sa.sin_addr, he->h_addr_list[0], sizeof sa.sin_addr);
     }
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { snprintf(err, errcap, "socket: %d", errno); return -1; }
+    if (fd < 0) { snprintf(err, errcap, "socket: %d", errno); plat_log("socket failed: %d errno %d", fd, errno); return -1; }
+    plat_log("connecting fd=%d to %s:%d", fd, inet_ntoa(sa.sin_addr), port);
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
         snprintf(err, errcap, "connect: %d", errno);
+        plat_log("connect failed: errno %d", errno);
         close(fd);
         return -1;
     }
+    plat_log("connected fd=%d", fd);
     return fd;
 }
 
+/* Readiness through poll(), not select(): lv2's select takes a 128-byte
+ * sys_net_fd_set, and a smaller C-library fd_set on the stack gets
+ * overwritten when the kernel writes the result back. pollfd is the same
+ * 8 bytes everywhere. */
 int net_recv(int fd, char *buf, size_t cap) {
-    fd_set r;
-    struct timeval tv;
-    int got;
-    FD_ZERO(&r);
-    FD_SET(fd, &r);
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
-    if (select(fd + 1, &r, NULL, NULL, &tv) <= 0) return 0;
+    struct pollfd p;
+    int rc, got;
+    p.fd = fd;
+    p.events = POLLIN;
+    p.revents = 0;
+    rc = poll(&p, 1, 0);
+    if (rc < 0) { plat_log("poll(%d) failed: %d errno %d", fd, rc, errno); return -1; }
+    if (rc == 0 || !(p.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) return 0;
     got = recv(fd, buf, cap, 0);
-    if (got == 0) return -1;
-    if (got < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+    if (got == 0) { plat_log("recv(%d): peer closed", fd); return -1; }
+    if (got < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        plat_log("recv(%d) failed: %d errno %d", fd, got, errno);
+        return -1;
+    }
     return got;
 }
 
 int net_send_all(int fd, const char *buf, size_t n) {
     while (n > 0) {
         int w = send(fd, buf, n, 0);
-        if (w < 0) return -1;
+        if (w < 0) { plat_log("send(%d, %u bytes) failed: %d errno %d", fd, (unsigned)n, w, errno); return -1; }
+        if (w == 0) { plat_log("send(%d) wrote nothing", fd); return -1; }
         buf += w;
         n -= (size_t)w;
     }

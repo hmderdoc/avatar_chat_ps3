@@ -73,7 +73,9 @@ static void try_connect(app_config *cfg) {
     g_retry = 0;
     proto_reader_init(&g_reader);
     snprintf(g_conn, sizeof g_conn, "online");
+    plat_log("joining #%s as %s", g_chat.channel, g_chat.nick);
     chat_connected(&g_chat);
+    plat_log("join packets sent");
 }
 
 int main(int argc, char **argv) {
@@ -139,6 +141,7 @@ int main(int argc, char **argv) {
                     snprintf(g_conn, sizeof g_conn, "offline");
                     break;
                 }
+                plat_log("recv %d bytes", got);
                 proto_feed(&g_reader, buf, (size_t)got, on_line, NULL);
             }
             chat_tick(&g_chat);

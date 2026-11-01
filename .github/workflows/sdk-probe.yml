@@ -1,0 +1,26 @@
+# Run a shell command inside the ps3dev toolchain image and read the
+# output in the job log: for checking an SDK header or a sizeof without
+# having the toolchain locally. Actions tab > sdk-probe > Run workflow.
+name: sdk-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Shell command to run in the image (cwd is the checkout)'
+        required: true
+        type: string
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run in the toolchain image
+        env:
+          CMD: ${{ inputs.command }}
+        run: |
+          img=""
+          for c in ghcr.io/ps3dev/ps3dev:latest ps3dev/ps3dev:submodules; do docker pull "$c" >/dev/null 2>&1 && img="$c" && break; done
+          echo "image: $img"
+          docker run --rm -v "$PWD:/src" -w /src -e CMD "$img" bash -c 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev PATH=$PATH:/usr/local/ps3dev/bin:/usr/local/ps3dev/ppu/bin; eval "$CMD"'
