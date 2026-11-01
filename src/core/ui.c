@@ -401,6 +401,104 @@ int ui_pic_cols(const ui *u, int cols) {
     return w < 8 ? 8 : w;
 }
 
+static void insert_char(ui *u, unsigned char ch);
+
+/* ---- built-in pad keyboard --------------------------------------------- */
+
+/* Four rows of keys; the last row holds the specials. */
+static const char *kb_rows_lower[4] = { "1234567890-=", "qwertyuiop[]", "asdfghjkl;'\\", "zxcvbnm,./" };
+static const char *kb_rows_upper[4] = { "!@#$%^&*()_+", "QWERTYUIOP{}", "ASDFGHJKL:\"|", "ZXCVBNM<>?" };
+#define KB_SPECIALS 5   /* space, backspace, shift, send, close */
+static const char *kb_special_names[KB_SPECIALS] = { "space", "bksp", "shift", "send", "close" };
+
+void ui_open_pad_keyboard(ui *u) {
+    u->kb_open = 1;
+    u->kb_row = 1;
+    u->kb_col = 0;
+    u->dirty = 1;
+}
+
+static int kb_row_len(const ui *u, int row) {
+    return row < 4 ? (int)strlen((u->kb_shift ? kb_rows_upper : kb_rows_lower)[row]) : KB_SPECIALS;
+}
+
+/* Height of the keyboard panel in rows (border, 4 key rows, specials). */
+#define KB_ROWS 7
+
+static void render_pad_keyboard(ui *u, screen *s, int y0) {
+    int r, c, cols = s->cols, x0;
+    const char **rows = u->kb_shift ? kb_rows_upper : kb_rows_lower;
+    int widest = 12 * 3 + 2;
+    x0 = (cols - widest) / 2;
+    if (x0 < 0) x0 = 0;
+    for (r = 0; r < KB_ROWS; r++) fill_row(s, y0 + r, ' ', 0x70);
+    draw_text(s, x0, y0, " Pad keyboard: D-pad moves, Cross types, Square backspace, Triangle space, Start sends, Circle closes ", 0x7F, cols - x0);
+    for (r = 0; r < 4; r++) {
+        int n = (int)strlen(rows[r]);
+        for (c = 0; c < n; c++) {
+            int sel = u->kb_row == r && u->kb_col == c;
+            put(s, x0 + 1 + c * 3, y0 + 1 + r, ' ', sel ? 0x4F : 0x70);
+            put(s, x0 + 2 + c * 3, y0 + 1 + r, (unsigned char)rows[r][c], sel ? 0x4F : 0x70);
+            put(s, x0 + 3 + c * 3, y0 + 1 + r, ' ', sel ? 0x4F : 0x70);
+        }
+    }
+    {
+        int x = x0 + 1;
+        for (c = 0; c < KB_SPECIALS; c++) {
+            int sel = u->kb_row == 4 && u->kb_col == c;
+            char lab[12];
+            snprintf(lab, sizeof lab, " %s ", kb_special_names[c]);
+            if (c == 2 && u->kb_shift) snprintf(lab, sizeof lab, " SHIFT ");
+            x = draw_text(s, x, y0 + 5, lab, sel ? 0x4F : 0x70, -1) + 1;
+        }
+    }
+}
+
+/* Keys while the pad keyboard is up. Returns 2 when the line should be
+ * sent (the caller runs the Enter path), 1 when handled, 0 if not ours. */
+static int pad_keyboard_key(ui *u, int key) {
+    switch (key) {
+    case KEY_UP: u->kb_row = (u->kb_row + 4) % 5; break;
+    case KEY_DOWN: u->kb_row = (u->kb_row + 1) % 5; break;
+    case KEY_LEFT: case KEY_ROOM_PREV: u->kb_col--; break;
+    case KEY_RIGHT: case KEY_ROOM_NEXT: u->kb_col++; break;
+    case KEY_PAD_SQUARE: case KEY_VIEW_ART: case KEY_BACKSPACE:
+        if (u->incur > 0) { memmove(u->input + u->incur - 1, u->input + u->incur, (size_t)(u->inlen - u->incur)); u->incur--; u->inlen--; }
+        break;
+    case KEY_OSK: insert_char(u, ' '); break;             /* Triangle: space */
+    case KEY_PAD_L1: case KEY_PAD_R1: u->kb_shift = !u->kb_shift; break;
+    case KEY_ESC: u->kb_open = 0; break;                  /* Circle */
+    case KEY_QUIT: u->kb_open = 0; return 2;              /* Start: send */
+    case KEY_ENTER: u->kb_open = 0; return 2;
+    case KEY_PAD_ENTER:                                   /* Cross: the key under the cursor */
+        if (u->kb_row < 4) {
+            const char *row = (u->kb_shift ? kb_rows_upper : kb_rows_lower)[u->kb_row];
+            insert_char(u, (unsigned char)row[u->kb_col]);
+            if (u->kb_shift) u->kb_shift = 0;
+        } else switch (u->kb_col) {
+            case 0: insert_char(u, ' '); break;
+            case 1: if (u->incur > 0) { memmove(u->input + u->incur - 1, u->input + u->incur, (size_t)(u->inlen - u->incur)); u->incur--; u->inlen--; } break;
+            case 2: u->kb_shift = !u->kb_shift; break;
+            case 3: u->kb_open = 0; return 2;
+            case 4: u->kb_open = 0; break;
+            default: break;
+        }
+        break;
+    case KEY_PGUP: case KEY_PGDN: u->kb_shift = !u->kb_shift; break;   /* L1/R1 arrive as page keys */
+    case KEY_TOGGLE_COMPACT: case KEY_PAD_L2: case KEY_PAD_R2:
+        break; /* swallowed while the keyboard is up */
+    default:
+        if (key >= 0x20 && key <= 0xFF) { insert_char(u, (unsigned char)key); break; } /* a USB keyboard still works */
+        return 0;
+    }
+    {
+        int n = kb_row_len(u, u->kb_row);
+        if (u->kb_col < 0) u->kb_col = n - 1;
+        if (u->kb_col >= n) u->kb_col = 0;
+    }
+    return 1;
+}
+
 /* ---- art viewer ------------------------------------------------------ */
 
 static void render_viewer(ui *u, chat *c, screen *s, long long now_ms) {
@@ -480,8 +578,9 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
     status_y = rows - 1;
     in_y = status_y - input_rows;
 
-    /* Transcript between header and input. */
-    transcript(u, c, s, 1, in_y - 1, now_ms);
+    /* Transcript between header and input (and the pad keyboard, if up). */
+    transcript(u, c, s, 1, in_y - 1 - (u->kb_open ? KB_ROWS : 0), now_ms);
+    if (u->kb_open) render_pad_keyboard(u, s, in_y - KB_ROWS);
 
     /* Input line(s). */
     {
@@ -579,7 +678,15 @@ int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nic
     if (key == KEY_NONE) return 0;
     u->dirty = 1;
     if (u->view_art >= 0) return viewer_key(u, c, key);
+    if (u->kb_open) {
+        int rc = pad_keyboard_key(u, key);
+        if (rc == 1) return 1;
+        if (rc == 2) key = KEY_ENTER;
+        else return 1;
+    }
     switch (key) {
+    case KEY_PAD_SQUARE: case KEY_PAD_L1: case KEY_PAD_R1: case KEY_PAD_L2: case KEY_PAD_R2:
+        return 1;
     case KEY_VIEW_ART:
     case KEY_F3: {
         int i, pick = c->nart - 1;

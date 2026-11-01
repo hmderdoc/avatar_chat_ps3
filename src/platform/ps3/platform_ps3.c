@@ -31,6 +31,7 @@
 #include "../../core/cp437.h"
 #include "../../core/font_cp437.h"
 #include "../../core/png.h"
+#include "../../core/gif.h"
 #include "../../core/pics.h"
 
 #include <curl/curl.h>
@@ -79,6 +80,7 @@ static sys_mem_container_t g_osk_container;
 static int g_osk_have_container;
 static u16 g_osk_title[64], g_osk_start[OSK_MAX + 1], g_osk_result[OSK_MAX + 1];
 static int g_osk_active;       /* dialog up */
+static int g_osk_shown;        /* LOADED seen */
 static int g_osk_outcome;      /* 0 none yet, 1 text in g_osk_result, -1 cancelled */
 static int g_osk_len;
 
@@ -100,7 +102,7 @@ static void sysutil_cb(u64 status, u64 param, void *userdata) {
     (void)param; (void)userdata;
     switch (status) {
     case SYSUTIL_EXIT_GAME: g_quit = 1; break;
-    case SYSUTIL_OSK_LOADED: plat_log("osk loaded"); break;
+    case SYSUTIL_OSK_LOADED: g_osk_shown = 1; plat_log("osk loaded"); break;
     case SYSUTIL_OSK_DONE: osk_finished(); break;
     case SYSUTIL_OSK_INPUT_CANCELED: plat_log("osk cancelled"); break;
     case SYSUTIL_OSK_UNLOADED: g_osk_active = 0; plat_log("osk unloaded"); break;
@@ -122,9 +124,16 @@ int plat_osk_open(const char *title, const unsigned char *text, int n) {
     s32 rc;
     if (g_osk_active) return 0;
     if (!g_osk_have_container) {
-        if (sysMemContainerCreate(&g_osk_container, 7 * 1024 * 1024) != 0) { plat_log("osk: no memory container"); return -1; }
-        g_osk_have_container = 1;
+        static const u32 sizes[3] = { 7 * 1024 * 1024, 4 * 1024 * 1024, 2 * 1024 * 1024 };
+        int i;
+        for (i = 0; i < 3 && !g_osk_have_container; i++) {
+            s32 crc = sysMemContainerCreate(&g_osk_container, sizes[i]);
+            if (crc == 0) { g_osk_have_container = 1; plat_log("osk: memory container of %u MB", (unsigned)(sizes[i] >> 20)); }
+            else plat_log("osk: sysMemContainerCreate(%u MB) = %d", (unsigned)(sizes[i] >> 20), (int)crc);
+        }
+        if (!g_osk_have_container) return -1;
     }
+    g_osk_shown = 0;
     to_utf16(g_osk_title, sizeof g_osk_title / sizeof g_osk_title[0], NULL, 0, title);
     to_utf16(g_osk_start, sizeof g_osk_start / sizeof g_osk_start[0], text, n, NULL);
     memset(&param, 0, sizeof param);
@@ -137,13 +146,17 @@ int plat_osk_open(const char *title, const unsigned char *text, int n) {
     info.message = g_osk_title;
     info.startText = g_osk_start;
     info.maxLength = OSK_MAX;
-    oskSetInitialInputDevice(OSK_DEVICE_PAD);
-    oskSetKeyLayoutOption(OSK_10KEY_PANEL | OSK_FULLKEY_PANEL);
-    oskSetLayoutMode(OSK_LAYOUTMODE_HORIZONTAL_ALIGN_CENTER | OSK_LAYOUTMODE_VERTICAL_ALIGN_BOTTOM);
+    {
+        s32 r1 = oskSetInitialInputDevice(OSK_DEVICE_PAD);
+        s32 r2 = oskSetKeyLayoutOption(OSK_10KEY_PANEL | OSK_FULLKEY_PANEL);
+        s32 r3 = oskSetLayoutMode(OSK_LAYOUTMODE_HORIZONTAL_ALIGN_CENTER | OSK_LAYOUTMODE_VERTICAL_ALIGN_BOTTOM);
+        plat_log("osk setup: device=%d layoutopt=%d layoutmode=%d", (int)r1, (int)r2, (int)r3);
+    }
     g_osk_outcome = 0;
     g_osk_len = 0;
     rc = oskLoadAsync(g_osk_container, &param, &info);
-    if (rc != 0) { plat_log("oskLoadAsync failed: %d", (int)rc); return -1; }
+    plat_log("oskLoadAsync = 0x%x", (unsigned)rc);
+    if (rc != 0) return -1;
     g_osk_active = 1;
     return 0;
 }
@@ -167,6 +180,20 @@ int plat_osk_poll(unsigned char *out, int cap, int *n) {
 }
 
 int plat_osk_active(void) { return g_osk_active; }
+int plat_osk_shown(void) { return g_osk_shown; }
+
+void plat_osk_abort(void) {
+    oskCallbackReturnParam ret;
+    if (!g_osk_active) return;
+    oskAbort();
+    memset(&ret, 0, sizeof ret);
+    ret.len = OSK_MAX;
+    ret.str = g_osk_result;
+    oskUnloadAsync(&ret);
+    g_osk_active = 0;
+    g_osk_outcome = 0;
+    plat_log("osk aborted");
+}
 
 static void wait_flip(void) {
     while (gcmGetFlipStatus() != 0) usleep(200);
@@ -704,7 +731,16 @@ int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, 
         return 1;
     }
     if (n > 3 && data[0] == 0xFF && data[1] == 0xD8) return decode_jpeg(data, n, rgb, w, h, err, errcap);
-    snprintf(err, errcap, n > 6 && memcmp(data, "GIF8", 4) == 0 ? "GIF not supported yet" : n > 12 && memcmp(data + 8, "WEBP", 4) == 0 ? "WebP not supported yet" : "not a picture");
+    if (gif_size(data, n, w, h)) {
+        unsigned char *scratch = malloc(gif_scratch());
+        if ((long long)*w * *h > 16000000LL) { free(scratch); snprintf(err, errcap, "image too large"); return 0; }
+        *rgb = malloc((size_t)*w * *h * 3);
+        if (!scratch || !*rgb) { free(scratch); free(*rgb); *rgb = NULL; snprintf(err, errcap, "no memory"); return 0; }
+        if (!gif_decode(data, n, *rgb, *w, *h, scratch, gif_scratch(), err, errcap)) { free(scratch); free(*rgb); *rgb = NULL; return 0; }
+        free(scratch);
+        return 1;
+    }
+    snprintf(err, errcap, n > 12 && memcmp(data + 8, "WEBP", 4) == 0 ? "WebP not supported" : "not a picture");
     return 0;
 }
 

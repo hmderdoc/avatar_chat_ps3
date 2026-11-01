@@ -15,6 +15,8 @@
 #include "core/art.h"
 #include "vectors.h"
 #include "vectors_png.h"
+#include "vectors_gif.h"
+#include "core/gif.h"
 #include "core/png.h"
 #include "core/pics.h"
 
@@ -362,6 +364,32 @@ static void test_wrap_and_render(void) {
             ui_key(&u, &c, KEY_ENTER, fake_now, nick, sizeof nick);
             CHECK(strcmp(nick, "a") == 0 && u.mode == UI_CHAT);
         }
+        /* The built-in pad keyboard: type "hi" then send with Start. */
+        ui_init(&u); u.mode = UI_CHAT; c.connected = 1; outlen = 0;
+        ui_open_pad_keyboard(&u);
+        CHECK(u.kb_open && u.kb_row == 1 && u.kb_col == 0);
+        /* 'h' is row 2 col 5; 'i' is row 1 col 7. */
+        ui_key(&u, &c, KEY_DOWN, fake_now, NULL, 0);
+        { int k; for (k = 0; k < 5; k++) ui_key(&u, &c, KEY_RIGHT, fake_now, NULL, 0); }
+        ui_key(&u, &c, KEY_PAD_ENTER, fake_now, NULL, 0);
+        ui_key(&u, &c, KEY_UP, fake_now, NULL, 0);
+        ui_key(&u, &c, KEY_RIGHT, fake_now, NULL, 0); ui_key(&u, &c, KEY_RIGHT, fake_now, NULL, 0);
+        ui_key(&u, &c, KEY_PAD_ENTER, fake_now, NULL, 0);
+        CHECK(u.inlen == 2 && u.input[0] == 'h' && u.input[1] == 'i');
+        ui_key(&u, &c, KEY_PAD_L1, fake_now, NULL, 0);   /* shift */
+        ui_key(&u, &c, KEY_PAD_ENTER, fake_now, NULL, 0); /* 'I' */
+        CHECK(u.inlen == 3 && u.input[2] == 'I' && u.kb_shift == 0);
+        ui_key(&u, &c, KEY_VIEW_ART, fake_now, NULL, 0);  /* Square: backspace */
+        CHECK(u.inlen == 2);
+        ui_key(&u, &c, KEY_LEFT, fake_now, NULL, 0);
+        CHECK(u.kb_col == 6);
+        { int k; for (k = 0; k < 7; k++) ui_key(&u, &c, KEY_LEFT, fake_now, NULL, 0); }
+        CHECK(u.kb_col == 11);                             /* wraps to the row end */
+        s.cols = 80; s.rows = 25;
+        ui_render(&u, &c, &s, fake_now, "online");
+        { int found_kb = 0, yy; for (yy = 0; yy < 25; yy++) if (s.cells[yy * 80 + 23].ch == 'q' || s.cells[yy * 80 + 24].ch == 'q') found_kb = 1; CHECK(found_kb); }
+        ui_key(&u, &c, KEY_QUIT, fake_now, NULL, 0);      /* Start: send */
+        CHECK(!u.kb_open && !u.quit && u.inlen == 0 && strstr(outbox, "\"str\":\"hi\""));
         /* The on-screen keyboard's text goes out like a typed line. */
         outlen = 0;
         c.connected = 1;
@@ -479,6 +507,25 @@ static void test_png_and_pics(void) {
     }
 }
 
+static void test_gif(void) {
+    static unsigned char scratch[20480], rgb[64 * 64 * 3];
+    char err[64];
+    int w, h, x, y, ok = 1;
+    CHECK(gif_size(gif_small, sizeof gif_small, &w, &h) && w == 4 && h == 2);
+    CHECK(gif_decode(gif_small, sizeof gif_small, rgb, 4, 2, scratch, sizeof scratch, err, sizeof err));
+    CHECK(rgb[0] == 255 && rgb[4] == 255 && rgb[8] == 255 && rgb[9] == 0 && rgb[10] == 0 && rgb[11] == 0);
+    CHECK(rgb[12] == 0 && rgb[13] == 0 && rgb[14] == 0 && rgb[17] == 255 && rgb[21] == 0 && rgb[22] == 255);
+    CHECK(gif_size(gif_il, sizeof gif_il, &w, &h) && gif_decode(gif_il, sizeof gif_il, rgb, 8, 8, scratch, sizeof scratch, err, sizeof err));
+    for (y = 0; y < 8; y++) for (x = 0; x < 8; x++) if (rgb[(y * 8 + x) * 3] != (y % 2 ? 200 : 10)) ok = 0;
+    CHECK(ok);
+    CHECK(gif_size(gif_big, sizeof gif_big, &w, &h) && gif_decode(gif_big, sizeof gif_big, rgb, 64, 64, scratch, sizeof scratch, err, sizeof err));
+    ok = 1;
+    for (y = 0; y < 64; y++) for (x = 0; x < 64; x++) if (rgb[(y * 64 + x) * 3] != 1 + 3 * ((x * y) % 3)) ok = 0;
+    CHECK(ok);
+    CHECK(!gif_decode(gif_big, sizeof gif_big / 3, rgb, 64, 64, scratch, sizeof scratch, err, sizeof err) || 1); /* truncated: no crash */
+    CHECK(!gif_is(png_rgb, sizeof png_rgb));
+}
+
 static void test_config(void) {
     app_config cfg;
     FILE *f = fopen("build-host/test.ini", "w");
@@ -504,6 +551,7 @@ int main(void) {
     test_wrap_and_render();
     test_inflate_and_art();
     test_png_and_pics();
+    test_gif();
     test_config();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

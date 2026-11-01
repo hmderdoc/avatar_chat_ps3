@@ -38,6 +38,7 @@ enum {
     KEY_ROOM_NEXT, KEY_ROOM_PREV,  /* pad Right/Left, Ctrl-N/Ctrl-P: other joined rooms */
     KEY_OSK,             /* pad Triangle: on-screen keyboard */
     KEY_PAD_ENTER,       /* pad Cross: Enter, or the keyboard when the line is empty */
+    KEY_PAD_SQUARE, KEY_PAD_L1, KEY_PAD_R1, KEY_PAD_L2, KEY_PAD_R2, /* raw pad buttons for the built-in keyboard */
     KEY_QUIT             /* pad Start, window close */
 };
 
@@ -59,7 +60,13 @@ typedef struct {
     int view_art, art_dx, art_dy;
     /* 1 while the platform's on-screen keyboard is up for our input line. */
     int osk_open;
+    /* The built-in pad keyboard: drawn in cells, no firmware dialog. */
+    int kb_open, kb_row, kb_col, kb_shift;
 } ui;
+
+/* Open the built-in pad keyboard (used when the system one is missing or
+ * fails, or when the ini asks for it). */
+void ui_open_pad_keyboard(ui *u);
 
 /* Text the on-screen keyboard returned: becomes the input line and is
  * sent (or, in UI_ASK_NICK mode, becomes the nickname). Same contract as

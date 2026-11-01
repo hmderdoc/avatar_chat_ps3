@@ -13,6 +13,7 @@ typedef struct {
     int history;
     int compact;
     int images;      /* fetch and show picture links */
+    int osk;         /* 1 system on-screen keyboard first, 2 built-in pad keyboard only */
     int ssl_verify;  /* check HTTPS certificates (needs cacert.pem) */
     int overscan_pct;
     int scale;

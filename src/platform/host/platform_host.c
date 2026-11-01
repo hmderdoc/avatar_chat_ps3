@@ -5,6 +5,7 @@
 #include "../../platform.h"
 #include "../../core/cp437.h"
 #include "../../core/png.h"
+#include "../../core/gif.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -227,6 +228,8 @@ int plat_quit_requested(void) { return g_quit; }
 int plat_osk_open(const char *title, const unsigned char *text, int n) { (void)title; (void)text; (void)n; return -1; }
 int plat_osk_poll(unsigned char *out, int cap, int *n) { (void)out; (void)cap; *n = 0; return -1; }
 int plat_osk_active(void) { return 0; }
+int plat_osk_shown(void) { return 0; }
+void plat_osk_abort(void) {}
 
 long long plat_now_ms(void) {
     struct timeval tv;
@@ -464,10 +467,21 @@ int plat_fetch_poll(const unsigned char **data, size_t *n, char *err, size_t err
 
 void plat_set_ssl_verify(int on) { (void)on; }
 
+static int decode_gif(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap) {
+    unsigned char *scratch = malloc(gif_scratch());
+    if ((long long)*w * *h > 16000000LL) { free(scratch); snprintf(err, errcap, "image too large"); return 0; }
+    *rgb = malloc((size_t)*w * *h * 3);
+    if (!scratch || !*rgb) { free(scratch); free(*rgb); *rgb = NULL; snprintf(err, errcap, "no memory"); return 0; }
+    if (!gif_decode(data, n, *rgb, *w, *h, scratch, gif_scratch(), err, errcap)) { free(scratch); free(*rgb); *rgb = NULL; return 0; }
+    free(scratch);
+    return 1;
+}
+
 int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap) {
     unsigned char *scratch;
     size_t sn;
-    if (!png_size(data, n, w, h)) { snprintf(err, errcap, "only PNG on the host build"); return 0; }
+    if (gif_size(data, n, w, h)) return decode_gif(data, n, rgb, w, h, err, errcap);
+    if (!png_size(data, n, w, h)) { snprintf(err, errcap, "only PNG and GIF on the host build"); return 0; }
     if ((long long)*w * *h > 16000000LL) { snprintf(err, errcap, "image too large"); return 0; }
     sn = png_scratch(*w, *h);
     scratch = malloc(sn);

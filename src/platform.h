@@ -44,6 +44,11 @@ int plat_osk_open(const char *title, const unsigned char *text, int n);
 int plat_osk_poll(unsigned char *out, int cap, int *n);
 /* 1 while the keyboard is showing. */
 int plat_osk_active(void);
+/* 1 once the system reported the dialog as loaded (so a request that
+ * never shows can be told apart from one in use). */
+int plat_osk_shown(void);
+/* Tear down a dialog that never appeared or is no longer wanted. */
+void plat_osk_abort(void);
 
 long long plat_now_ms(void);
 void plat_sleep_ms(int ms);

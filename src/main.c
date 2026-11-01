@@ -38,6 +38,7 @@ static void on_line(void *ctx, const char *line, size_t n) {
 }
 
 /* One picture download at a time, polled from the loop. */
+static long long g_osk_opened;
 static pic *g_fetching;
 static long long g_fetch_started;
 #define PIC_MAX_BYTES (5u * 1024u * 1024u)
@@ -200,14 +201,30 @@ int main(int argc, char **argv) {
             int n = 0, rc = plat_osk_poll(text, sizeof text, &n);
             if (rc == 1) dirty |= ui_osk_result(&g_ui, &g_chat, text, n, now, nick, sizeof nick);
             else if (rc < 0) { g_ui.osk_open = 0; dirty = 1; }
+            else if (!plat_osk_shown() && now - g_osk_opened > 6000) {
+                /* The dialog never came up: give up on it for this run and
+                 * use the built-in keyboard instead. */
+                plat_osk_abort();
+                g_ui.osk_open = 0;
+                cfg.osk = 2;
+                plat_log("system keyboard did not appear in 6 s; using the built-in one");
+                ui_set_status(&g_ui, now, 4000, "System keyboard did not appear; using the built-in one.");
+                ui_open_pad_keyboard(&g_ui);
+            }
             dirty = 1; /* keep flipping frames under the dialog */
         }
         while ((key = plat_poll_key()) != KEY_NONE) {
             if (g_ui.osk_open) continue; /* the dialog has the pad */
-            if (key == KEY_OSK || (key == KEY_PAD_ENTER && g_ui.inlen == 0 && g_ui.view_art < 0)) {
+            if (!g_ui.kb_open && (key == KEY_OSK || (key == KEY_PAD_ENTER && g_ui.inlen == 0 && g_ui.view_art < 0))) {
                 const char *title = g_ui.mode == UI_ASK_NICK ? "Your nickname" : "Say something";
-                if (plat_osk_open(title, g_ui.input, g_ui.inlen) == 0) g_ui.osk_open = 1;
-                else ui_set_status(&g_ui, now, 3000, "No on-screen keyboard here; type on the keyboard.");
+                if (cfg.osk == 1 && plat_osk_open(title, g_ui.input, g_ui.inlen) == 0) {
+                    g_ui.osk_open = 1;
+                    g_osk_opened = now;
+                    ui_set_status(&g_ui, now, 4000, "Opening the system keyboard...");
+                } else {
+                    if (cfg.osk == 1) { plat_log("system keyboard unavailable; using the built-in one"); cfg.osk = 2; }
+                    ui_open_pad_keyboard(&g_ui);
+                }
                 dirty = 1;
                 continue;
             }
