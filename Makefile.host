@@ -36,5 +36,8 @@ check-ps3:
 	$(CC) -std=gnu99 -Wall -Wextra -Wno-unused-parameter -fsyntax-only -nostdinc \
 	  -isystem tests/ps3shim -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu \
 	  -isystem $$($(CC) -print-file-name=include) -Isrc src/platform/ps3/platform_ps3.c
+	$(CC) -std=gnu99 -Wall -Wextra -Wno-unused-parameter -fsyntax-only -nostdinc \
+	  -isystem tests/ps3shim -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu \
+	  -isystem $$($(CC) -print-file-name=include) -Isrc src/platform/ps3/audio_ps3.c
 
 .PHONY: check-ps3

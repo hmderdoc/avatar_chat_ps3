@@ -10,6 +10,7 @@
 #include "core/ui.h"
 #include "core/proto.h"
 #include "core/avatar.h"
+#include "core/player.h"
 
 static chat g_chat;
 static ui g_ui;
@@ -37,6 +38,84 @@ static void on_line(void *ctx, const char *line, size_t n) {
     chat_feed_line(&g_chat, line, n);
 }
 
+/* ---- audio: /play downloads a track, then decodes a little ahead of the port */
+static struct {
+    int state;                 /* 0 idle, 1 downloading, 2 playing */
+    pic *dl;
+    unsigned char *data;
+    size_t n;
+    player pl;
+    char url[PIC_URL];
+} g_audio;
+
+static void audio_stop(const char *why) {
+    if (g_audio.state == 2) {
+        plat_audio_close();
+        if (g_audio.pl.dec) adec_close(g_audio.pl.dec);
+        g_audio.pl.dec = NULL;
+    }
+    free(g_audio.data);
+    g_audio.data = NULL;
+    free(g_audio.pl.fifo);
+    g_audio.pl.fifo = NULL;
+    if (g_audio.state && why) chat_notice(&g_chat, "%s %s", why, g_audio.pl.name);
+    g_audio.state = 0;
+    g_audio.dl = NULL;
+}
+
+static void audio_start(const char *url) {
+    const char *name = strrchr(url, '/');
+    audio_stop(NULL);
+    snprintf(g_audio.url, sizeof g_audio.url, "%s", url);
+    snprintf(g_audio.pl.name, sizeof g_audio.pl.name, "%.95s", name ? name + 1 : url);
+    g_audio.dl = pics_get(&g_chat.pics, url, FETCH_AUDIO);
+    if (g_audio.dl->state == PIC_FAILED) g_audio.dl->state = PIC_QUEUED;
+    g_audio.dl->veiled = 0;
+    g_audio.state = 1;
+    chat_notice(&g_chat, "Fetching %s ...", g_audio.pl.name);
+}
+
+/* Called when a FETCH_AUDIO download completes (data valid until the next fetch). */
+static void audio_downloaded(const unsigned char *data, size_t n) {
+    char err[80];
+    int rate = 0, channels = 0;
+    if (g_audio.state != 1) return;
+    g_audio.data = malloc(n);
+    if (!g_audio.data) { audio_stop("Out of memory for"); return; }
+    memcpy(g_audio.data, data, n);
+    g_audio.n = n;
+    g_audio.pl.dec = adec_open(g_audio.data, n, g_audio.pl.name, err, sizeof err);
+    if (!g_audio.pl.dec) { chat_notice(&g_chat, "Can't play %s: %s", g_audio.pl.name, err); audio_stop(NULL); return; }
+    adec_info(g_audio.pl.dec, &rate, &channels);
+    if (rate < 8000 || rate > 192000 || channels < 1 || channels > 2) { adec_close(g_audio.pl.dec); g_audio.pl.dec = NULL; chat_notice(&g_chat, "Can't play %s: odd format", g_audio.pl.name); audio_stop(NULL); return; }
+    g_audio.pl.rate = rate;
+    g_audio.pl.channels = channels;
+    g_audio.pl.head = g_audio.pl.count = 0;
+    g_audio.pl.done = 0;
+    g_audio.pl.frames_out = 0;
+    g_audio.pl.fifo = malloc((size_t)PLAYER_FIFO_FRAMES * channels * sizeof(short));
+    if (!g_audio.pl.fifo || plat_audio_open(rate, channels) != 0) { chat_notice(&g_chat, "No audio output."); audio_stop(NULL); return; }
+    g_audio.state = 2;
+    chat_notice(&g_chat, "Playing %s (%d Hz, %s). /stop stops.", g_audio.pl.name, rate, channels == 2 ? "stereo" : "mono");
+    plat_log("audio: playing %s %d Hz x%d", g_audio.pl.name, rate, channels);
+}
+
+static void pump_audio(void) {
+    static short out[8192 * 2];
+    if (g_chat.want_stop) { g_chat.want_stop = 0; if (g_audio.state) audio_stop("Stopped"); else chat_notice(&g_chat, "Nothing is playing."); }
+    if (g_chat.want_play[0]) { audio_start(g_chat.want_play); g_chat.want_play[0] = 0; }
+    if (g_audio.state != 2) return;
+    if (player_fill(&g_audio.pl, adec_pull) < 0) { audio_stop("Decoding failed for"); return; }
+    {
+        int space = plat_audio_space(), want = space < 8192 ? space : 8192, got;
+        if (want > 0) {
+            got = player_take(&g_audio.pl, out, want);
+            if (got > 0) plat_audio_write(out, got);
+        }
+    }
+    if (g_audio.pl.done && player_empty(&g_audio.pl)) audio_stop("Finished");
+}
+
 /* One picture download at a time, polled from the loop. */
 static long long g_osk_opened;
 static pic *g_fetching;
@@ -50,7 +129,12 @@ static void pump_pictures(long long now) {
         pic *p = pics_next_queued(&g_chat.pics);
         if (!p) return;
         if (p->veiled) return; /* waits for /nsfw */
-        if (plat_fetch_start(p->url, p->kind == FETCH_PAGE ? 256u * 1024u : PIC_MAX_BYTES, err, sizeof err) != 0) { pics_fail(p, err); g_chat.seq++; return; }
+        if (plat_fetch_start(p->url, p->kind == FETCH_PAGE ? 256u * 1024u : p->kind == FETCH_AUDIO ? 20u * 1024u * 1024u : PIC_MAX_BYTES, err, sizeof err) != 0) {
+            pics_fail(p, err);
+            g_chat.seq++;
+            if (p->kind == FETCH_AUDIO && g_audio.dl == p) { chat_notice(&g_chat, "Can't fetch %s: %s", g_audio.pl.name, err); audio_stop(NULL); }
+            return;
+        }
         p->state = PIC_LOADING;
         g_fetching = p;
         g_fetch_started = now;
@@ -65,8 +149,14 @@ static void pump_pictures(long long now) {
             if (now - g_fetch_started > PIC_TIMEOUT_MS) { plat_fetch_cancel(); pics_fail(g_fetching, "timed out"); g_fetching = NULL; g_chat.seq++; }
             return;
         }
-        if (rc < 0) { pics_fail(g_fetching, err); plat_log("picture: %s", err); }
-        else if (g_fetching->kind == FETCH_PAGE) {
+        if (rc < 0) {
+            pics_fail(g_fetching, err);
+            plat_log("fetch: %s", err);
+            if (g_fetching->kind == FETCH_AUDIO && g_audio.dl == g_fetching) { chat_notice(&g_chat, "Can't fetch %s: %s", g_audio.pl.name, err); audio_stop(NULL); }
+        } else if (g_fetching->kind == FETCH_AUDIO) {
+            g_fetching->state = PIC_READY;
+            if (g_audio.dl == g_fetching) audio_downloaded(data, n);
+        } else if (g_fetching->kind == FETCH_PAGE) {
             pics_parse_page(g_fetching, (const char *)data, n);
             g_fetching->state = PIC_READY;
             plat_log("card: %s | %s", g_fetching->site, g_fetching->title);
@@ -200,7 +290,8 @@ int main(int argc, char **argv) {
             }
             chat_tick(&g_chat);
         }
-        if (g_chat.show_pics || g_chat.show_cards) pump_pictures(now);
+        pump_pictures(now);
+        pump_audio();
 
         nick[0] = 0;
         if (g_ui.osk_open) {
@@ -256,6 +347,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    audio_stop(NULL);
     if (g_sock >= 0) plat_net_close(g_sock);
     plat_shutdown();
     return 0;

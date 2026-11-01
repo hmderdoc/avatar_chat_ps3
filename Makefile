@@ -33,7 +33,7 @@ LDFLAGS     = $(MACHDEP) -Wl,-Map,$(notdir $@).map
 # portlibs; polarssl's library sits under its include tree there.
 PORTLIBS    ?= $(PS3DEV)/portlibs/ppu
 LIBDIRS     := $(PORTLIBS)
-LIBS        := -lcurl -lpolarssl -ljpeg -lz -lrsx -lgcm_sys -lio -lsysutil -lnet -lsysmodule -lrt -llv2 -lm
+LIBS        := -lcurl -lpolarssl -ljpeg -lz -lmad -lvorbisfile -lvorbis -logg -lFLAC -laudio -lrsx -lgcm_sys -lio -lsysutil -lnet -lsysmodule -lrt -llv2 -lm
 LDFLAGS     += -L$(PORTLIBS)/include/polarssl/lib
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))

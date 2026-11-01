@@ -6,6 +6,7 @@
 #include "../../core/cp437.h"
 #include "../../core/png.h"
 #include "../../core/gif.h"
+#include "../../core/wav.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -491,6 +492,35 @@ int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, 
     free(scratch);
     return 1;
 }
+
+/* ---- audio: WAV only, played into the void at the right pace -------------- */
+
+struct adec { wav_reader wav; };
+
+adec *adec_open(const unsigned char *data, size_t n, const char *name, char *err, size_t errcap) {
+    adec *d;
+    (void)name;
+    if (!wav_is(data, n)) { snprintf(err, errcap, "only WAV on the host build"); return NULL; }
+    d = calloc(1, sizeof *d);
+    if (!d) { snprintf(err, errcap, "no memory"); return NULL; }
+    if (!wav_open(&d->wav, data, n, err, errcap)) { free(d); return NULL; }
+    return d;
+}
+void adec_info(adec *d, int *rate, int *channels) { *rate = d->wav.rate; *channels = d->wav.channels; }
+int adec_pull(adec *d, short *out, int max_frames) { return wav_pull(&d->wav, out, max_frames); }
+void adec_close(adec *d) { free(d); }
+
+static long long g_audio_t0, g_audio_frames;
+static int g_audio_rate = 48000;
+
+int plat_audio_open(int rate, int channels) { (void)channels; g_audio_rate = rate; g_audio_t0 = plat_now_ms(); g_audio_frames = 0; return 0; }
+int plat_audio_space(void) {
+    long long due = (plat_now_ms() - g_audio_t0) * g_audio_rate / 1000 + g_audio_rate / 2; /* half a second ahead */
+    long long space = due - g_audio_frames;
+    return space < 0 ? 0 : space > 65536 ? 65536 : (int)space;
+}
+int plat_audio_write(const short *pcm, int frames) { (void)pcm; g_audio_frames += frames; return frames; }
+void plat_audio_close(void) {}
 
 void plat_log(const char *fmt, ...) {
     va_list ap;

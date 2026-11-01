@@ -75,6 +75,25 @@ void plat_set_ssl_verify(int on);
  * malloc'd packed RGB buffer; 1 on success. The caller frees *rgb. */
 int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap);
 
+/* Audio decoding. adec_open takes a whole downloaded file (kept alive by
+ * the caller until adec_close) and a name hint for the format; NULL with
+ * err set when the platform can't decode it. adec_pull copies up to max
+ * interleaved 16-bit frames; 0 at the end, -1 on error. */
+typedef struct adec adec;
+adec *adec_open(const unsigned char *data, size_t n, const char *name, char *err, size_t errcap);
+void adec_info(adec *d, int *rate, int *channels);
+int adec_pull(adec *d, short *out, int max_frames);
+void adec_close(adec *d);
+
+/* Audio output. plat_audio_open starts the device for a source rate and
+ * channel count (the platform resamples); plat_audio_space is how many
+ * source frames it can take right now; plat_audio_write queues frames
+ * (returns how many it took); plat_audio_close stops. */
+int plat_audio_open(int rate, int channels);
+int plat_audio_space(void);
+int plat_audio_write(const short *pcm, int frames);
+void plat_audio_close(void);
+
 void plat_log(const char *fmt, ...);
 
 #endif
