@@ -484,7 +484,7 @@ static void test_png_and_pics(void) {
     {
         char links[3][PIC_URL];
         const char *t = "see https://x.org/a/cat.PNG?x=1, and http://y/dog.jpg. not http://z/page.html https://q/w.webp";
-        int n = pics_find_links((const unsigned char *)t, (int)strlen(t), links, 3);
+        int n = pics_find_links((const unsigned char *)t, (int)strlen(t), links, 3, pics_is_image_url);
         CHECK(n == 3 && strcmp(links[0], "https://x.org/a/cat.PNG?x=1") == 0 && strcmp(links[1], "http://y/dog.jpg") == 0 && strcmp(links[2], "https://q/w.webp") == 0);
         CHECK(!pics_is_image_url("ftp://a/b.png", 13) && pics_is_image_url("http://a/b.jpeg#f", 17));
     }
@@ -496,14 +496,59 @@ static void test_png_and_pics(void) {
         int i;
         for (i = 0; i < 400 * 100; i++) { big[i * 3] = (unsigned char)(i % 400 < 200 ? 255 : 0); big[i * 3 + 1] = 0; big[i * 3 + 2] = (unsigned char)((i / 400) < 50 ? 255 : 0); }
         pics_init(&pc);
-        p = pics_get(&pc, "http://h/i.png");
+        p = pics_get(&pc, "http://h/i.png", FETCH_PICTURE);
         CHECK(p && p->state == PIC_QUEUED && pics_next_queued(&pc) == p && pics_find(&pc, "http://h/i.png") == p);
         pics_set_rgb(p, big, 400, 100, 40);
         CHECK(p->state == PIC_READY && p->cols == 40 && p->rows == 5);
         CHECK(p->top[0] == 0xFF00FF && p->bot[4 * 40 + 39] == 0x000000 && p->top[3 * 40 + 0] == 0xFF0000 && p->bot[1 * 40 + 20] == 0x0000FF);
         /* The cache evicts the least recently used ready entry. */
-        for (i = 0; i < PIC_MAX + 2; i++) { char u[64]; snprintf(u, sizeof u, "http://h/%d.png", i); pics_get(&pc, u); }
+        for (i = 0; i < PIC_MAX + 2; i++) { char u[64]; snprintf(u, sizeof u, "http://h/%d.png", i); pics_get(&pc, u, FETCH_PICTURE); }
         CHECK(pics_find(&pc, "http://h/i.png") == NULL && pics_find(&pc, "http://h/25.png") != NULL);
+    }
+}
+
+static void test_cards_and_nsfw(void) {
+    static pic p;
+    const char *html = "<html><head><title>Fallback &amp; Title</title>"
+        "<meta property=\"og:site_name\" content=\"Example News\">"
+        "<meta name='description' content='plain desc'>"
+        "<meta property=\"og:description\" content=\"The  quick\n brown &#8220;fox&#8221; caf\xc3\xa9 \xe2\x80\x94 ok\">"
+        "<meta property=\"og:audio\" content=\"https://cdn.example/track.mp3\">"
+        "</head><body>x</body></html>";
+    memset(&p, 0, sizeof p);
+    snprintf(p.url, sizeof p.url, "https://www.example.org/story?x=1");
+    pics_parse_page(&p, html, strlen(html));
+    CHECK(strcmp(p.site, "Example News") == 0);
+    CHECK(strcmp(p.title, "Fallback & Title") == 0);
+    CHECK(strcmp(p.desc, "The quick brown \"fox\" cafe - ok") == 0);
+    CHECK(strcmp(p.audio, "https://cdn.example/track.mp3") == 0);
+    memset(&p, 0, sizeof p);
+    snprintf(p.url, sizeof p.url, "https://www.example.org/story");
+    pics_parse_page(&p, "<title>only</title>", 19);
+    CHECK(strcmp(p.site, "example.org") == 0 && strcmp(p.title, "only") == 0 && p.desc[0] == 0);
+    CHECK(pics_looks_nsfw("check this NSFW pic", NULL) && pics_looks_nsfw("http://x/my%20nudes.jpg", NULL) && !pics_looks_nsfw("sussex essex", NULL));
+    CHECK(pics_looks_nsfw("some cat", "dog, cat") && !pics_looks_nsfw("some cat", "none"));
+    CHECK(pics_is_audio_url("https://a/b/song.MP3?dl=1", 26) && !pics_is_audio_url("https://a/b/song.txt", 20));
+    {
+        /* Through the chat: a plain link gets a card entry, an audio link a play line, nsfw veils. */
+        static chat c;
+        chat_io io;
+        char links[9][PIC_URL];
+        io.ctx = NULL; io.send = cap_send; io.now_ms = cap_now;
+        chat_init(&c, &io);
+        chat_set_identity(&c, "SiX", "PS3", NULL);
+        feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"a\"},\"str\":\"read https://example.org/post and hear https://x/y.ogg\",\"time\":1}}");
+        CHECK(strcmp(chat_msg_at(&c, 0)->card, "https://example.org/post") == 0 && chat_msg_at(&c, 0)->naudios == 1);
+        CHECK(pics_find(&c.pics, "https://example.org/post") && pics_find(&c.pics, "https://example.org/post")->kind == FETCH_PAGE);
+        CHECK(chat_audio_links(&c, links, 9) == 1 && strcmp(links[0], "https://x/y.ogg") == 0);
+        feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"a\"},\"str\":\"nsfw http://x/pic.png\",\"time\":2}}");
+        CHECK(chat_msg_at(&c, 1)->nsfw && pics_find(&c.pics, "http://x/pic.png")->veiled && pics_next_queued(&c.pics) != pics_find(&c.pics, "http://x/pic.png"));
+        chat_input(&c, (const unsigned char *)"/nsfw", 5);
+        CHECK(c.nsfw_shown && !pics_find(&c.pics, "http://x/pic.png")->veiled);
+        chat_input(&c, (const unsigned char *)"/play", 5);
+        CHECK(strcmp(c.want_play, "https://x/y.ogg") == 0);
+        chat_input(&c, (const unsigned char *)"/play 2", 7);
+        CHECK(strstr(last_text(&c, links[0], PIC_URL), "/play N picks"));
     }
 }
 
@@ -552,6 +597,7 @@ int main(void) {
     test_inflate_and_art();
     test_png_and_pics();
     test_gif();
+    test_cards_and_nsfw();
     test_config();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

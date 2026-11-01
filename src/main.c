@@ -49,7 +49,8 @@ static void pump_pictures(long long now) {
     if (!g_fetching) {
         pic *p = pics_next_queued(&g_chat.pics);
         if (!p) return;
-        if (plat_fetch_start(p->url, PIC_MAX_BYTES, err, sizeof err) != 0) { pics_fail(p, err); g_chat.seq++; return; }
+        if (p->veiled) return; /* waits for /nsfw */
+        if (plat_fetch_start(p->url, p->kind == FETCH_PAGE ? 256u * 1024u : PIC_MAX_BYTES, err, sizeof err) != 0) { pics_fail(p, err); g_chat.seq++; return; }
         p->state = PIC_LOADING;
         g_fetching = p;
         g_fetch_started = now;
@@ -65,7 +66,11 @@ static void pump_pictures(long long now) {
             return;
         }
         if (rc < 0) { pics_fail(g_fetching, err); plat_log("picture: %s", err); }
-        else {
+        else if (g_fetching->kind == FETCH_PAGE) {
+            pics_parse_page(g_fetching, (const char *)data, n);
+            g_fetching->state = PIC_READY;
+            plat_log("card: %s | %s", g_fetching->site, g_fetching->title);
+        } else {
             unsigned char *rgb = NULL;
             int w = 0, h = 0;
             if (plat_decode_image(data, n, &rgb, &w, &h, err, sizeof err)) {
@@ -149,6 +154,8 @@ int main(int argc, char **argv) {
     chat_init(&g_chat, &io);
     g_chat.history_count = cfg.history;
     g_chat.show_pics = cfg.images;
+    g_chat.show_cards = cfg.cards;
+    snprintf(g_chat.nsfw_keywords, sizeof g_chat.nsfw_keywords, "%s", cfg.nsfw_keywords);
     plat_set_ssl_verify(cfg.ssl_verify);
     chat_set_channel(&g_chat, cfg.channel);
     has_avatar = load_avatar(&cfg, avatar);
@@ -193,7 +200,7 @@ int main(int argc, char **argv) {
             }
             chat_tick(&g_chat);
         }
-        if (g_chat.show_pics) pump_pictures(now);
+        if (g_chat.show_pics || g_chat.show_cards) pump_pictures(now);
 
         nick[0] = 0;
         if (g_ui.osk_open) {

@@ -14,6 +14,7 @@ void config_defaults(app_config *c) {
     c->history = 40;
     c->overscan_pct = 5;
     c->images = 1;
+    c->cards = 1;
     c->ssl_verify = 1;
     c->osk = 1;
 }
@@ -53,6 +54,8 @@ int config_load(app_config *c, const char *path) {
         else if (!strcasecmp(k, "history")) c->history = atoi(v);
         else if (!strcasecmp(k, "compact")) c->compact = on_off(v);
         else if (!strcasecmp(k, "images")) c->images = on_off(v);
+        else if (!strcasecmp(k, "link_previews") || !strcasecmp(k, "cards")) c->cards = on_off(v);
+        else if (!strcasecmp(k, "nsfw_keywords")) snprintf(c->nsfw_keywords, sizeof c->nsfw_keywords, "%s", v);
         else if (!strcasecmp(k, "osk") || !strcasecmp(k, "keyboard")) c->osk = !strcasecmp(v, "builtin") || !strcasecmp(v, "pad") ? 2 : 1;
         else if (!strcasecmp(k, "ssl_verify")) c->ssl_verify = on_off(v);
         else if (!strcasecmp(k, "overscan")) c->overscan_pct = atoi(v);

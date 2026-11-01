@@ -38,9 +38,14 @@ typedef struct {
     unsigned char ncolors;
     char tag[13];
     unsigned int tag_fg, tag_bg;
-    /* Picture links in the text (up to 3), drawn under it once fetched. */
+    /* Picture links in the text (up to 3), drawn under it once fetched;
+     * the first plain link gets a card; audio links get a play line. */
     char pics[3][PIC_URL];
     unsigned char npics;
+    char card[PIC_URL];
+    char audios[3][PIC_URL];
+    unsigned char naudios;
+    int nsfw;                   /* the line or a link tripped the veil */
 } chat_msg;
 
 typedef struct {
@@ -105,12 +110,21 @@ typedef struct chat {
     /* Pictures linked in messages, fetched by the platform. */
     pic_cache pics;
     int show_pics;             /* 0 turns picture fetching off */
+    int show_cards;            /* link preview cards */
+    char nsfw_keywords[512];   /* comma list; "none" turns the veil off */
+    int nsfw_shown;            /* /nsfw: veils lifted for this session */
+    /* /play: the audio link to start, as a URL the main loop picks up. */
+    char want_play[PIC_URL];
+    int want_stop;
 
     /* Art received ([BITMAP|...]), newest last; a ring of CHAT_ARTS. */
     chat_art arts[CHAT_ARTS];
     int art_head, nart;
     int want_art;              /* UI hint: open the viewer on art index n (oldest = 0); -1 none */
 } chat;
+
+/* Audio links seen, newest first: fills out with up to max URLs. */
+int chat_audio_links(const chat *c, char out[][PIC_URL], int max);
 
 /* Art i, oldest first (0 .. nart-1), or NULL. */
 chat_art *chat_art_at(chat *c, int i);

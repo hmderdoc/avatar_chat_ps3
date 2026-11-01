@@ -42,18 +42,48 @@ void chat_init(chat *c, const chat_io *io) {
     c->history_count = 40;
     c->want_art = -1;
     c->show_pics = 1;
+    c->show_cards = 1;
     pics_init(&c->pics);
     strcpy(c->channel, "main");
     strcpy(c->joined[0], "main");
     c->njoined = 1;
 }
 
-/* Picture links in a message: remember them and queue the fetches. */
+static int is_plain_link(const char *u, size_t n) { return !pics_is_image_url(u, n) && !pics_is_audio_url(u, n); }
+
+/* Links in a message: pictures (fetched and drawn), the first plain link
+ * (a card), audio files (a play line). An NSFW word in the line or a
+ * link veils the pictures and the card until /nsfw. */
 static void take_pics(chat *c, chat_msg *m, const char *utf8) {
-    int i;
-    if (!c->show_pics) return;
-    m->npics = (unsigned char)pics_find_links((const unsigned char *)utf8, (int)strlen(utf8), m->pics, 3);
-    for (i = 0; i < m->npics; i++) pics_get(&c->pics, m->pics[i]);
+    int i, n = (int)strlen(utf8);
+    const char *kw = c->nsfw_keywords[0] ? c->nsfw_keywords : NULL;
+    m->nsfw = pics_looks_nsfw(utf8, kw);
+    if (c->show_pics) {
+        m->npics = (unsigned char)pics_find_links((const unsigned char *)utf8, n, m->pics, 3, pics_is_image_url);
+        for (i = 0; i < m->npics; i++) {
+            pic *p = pics_get(&c->pics, m->pics[i], FETCH_PICTURE);
+            if (m->nsfw && !c->nsfw_shown && p->state == PIC_QUEUED) p->veiled = 1;
+        }
+    }
+    if (c->show_cards) {
+        char one[1][PIC_URL];
+        if (pics_find_links((const unsigned char *)utf8, n, one, 1, is_plain_link) == 1) {
+            pic *p;
+            snprintf(m->card, sizeof m->card, "%s", one[0]);
+            p = pics_get(&c->pics, m->card, FETCH_PAGE);
+            if (m->nsfw && !c->nsfw_shown && p->state == PIC_QUEUED) p->veiled = 1;
+        }
+    }
+    m->naudios = (unsigned char)pics_find_links((const unsigned char *)utf8, n, m->audios, 3, pics_is_audio_url);
+}
+
+int chat_audio_links(const chat *c, char out[][PIC_URL], int max) {
+    int i, k, n = 0;
+    for (i = c->count - 1; i >= 0 && n < max; i--) {
+        const chat_msg *m = chat_msg_at(c, i);
+        for (k = 0; k < m->naudios && n < max; k++) { snprintf(out[n], PIC_URL, "%s", m->audios[k]); n++; }
+    }
+    return n;
 }
 
 static int room_index(const chat *c, const char *name) {
@@ -373,7 +403,7 @@ static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm,
 }
 
 static void help(chat *c) {
-    chat_notice(c, "Commands: /join <room>  /leave [room]  /next  /prev  /rooms  /who  /msg <name> <text>  /r <text>  /img [N]  /compact  /quit");
+    chat_notice(c, "Commands: /join <room>  /leave [room]  /next  /prev  /rooms  /who  /msg <name> <text>  /r <text>  /img [N]  /play [N|list]  /stop  /nsfw  /compact  /quit");
 }
 
 void chat_input(chat *c, const unsigned char *line, size_t n) {
@@ -394,6 +424,36 @@ void chat_input(chat *c, const unsigned char *line, size_t n) {
     if (ieq(p, "quit") || ieq(p, "exit") || ieq(p, "q")) { c->want_quit = 1; return; }
     if (ieq(p, "help") || ieq(p, "?")) { help(c); return; }
     if (ieq(p, "compact")) { c->toggle_compact = 1; return; }
+    if (ieq(p, "nsfw")) {
+        int i;
+        c->nsfw_shown = !c->nsfw_shown;
+        for (i = 0; i < PIC_MAX; i++)
+            if (c->pics.items[i].veiled && c->nsfw_shown) c->pics.items[i].veiled = 0;
+        chat_notice(c, c->nsfw_shown ? "Veiled pictures and cards will load now." : "New NSFW pictures and cards will be veiled again.");
+        return;
+    }
+    if (ieq(p, "stop")) { c->want_stop = 1; return; }
+    if (ieq(p, "play") || strncmp(p, "play ", 5) == 0) {
+        char links[9][PIC_URL];
+        int n = chat_audio_links(c, links, 9), k = 1;
+        if (n == 0) { chat_notice(c, "No audio links in this room yet."); return; }
+        if (p[4] == ' ') {
+            p += 5;
+            while (*p == ' ') p++;
+            if (ieq(p, "list")) {
+                int i;
+                for (i = 0; i < n; i++) {
+                    const char *name = strrchr(links[i], '/');
+                    chat_notice(c, "  /play %d  %s", i + 1, name ? name + 1 : links[i]);
+                }
+                return;
+            }
+            k = atoi(p);
+            if (k < 1 || k > n) { chat_notice(c, "/play N picks one of the last %d audio links, 1 = newest.", n); return; }
+        }
+        snprintf(c->want_play, sizeof c->want_play, "%s", links[k - 1]);
+        return;
+    }
     if (ieq(p, "img") || strncmp(p, "img ", 4) == 0) {
         int n = c->nart;
         if (n == 0) { chat_notice(c, "No art has been sent here yet."); return; }

@@ -195,16 +195,50 @@ static int same_group(const chat_msg *a, const chat_msg *b) {
            b->time - a->time < GROUP_MS && b->time >= a->time;
 }
 
-/* Rows a message's pictures take: a picture's cell rows when it is
- * ready, else one line of status. */
+/* The lines of a link card: site, title (up to 2 lines), description (up
+ * to 2 lines), or one status line. Returns the count. */
+#define CARD_MAX_LINES 5
+static int card_lines(const pic *p, int width, char lines[CARD_MAX_LINES][UI_MAX_COLS + 1], unsigned char attrs[CARD_MAX_LINES]) {
+    int n = 0;
+    if (width > UI_MAX_COLS) width = UI_MAX_COLS;
+    if (width < 12) width = 12;
+    if (p->veiled) { snprintf(lines[0], UI_MAX_COLS + 1, "[NSFW link - /nsfw to show]"); attrs[0] = C_META; return 1; }
+    if (p->state == PIC_FAILED) { snprintf(lines[0], UI_MAX_COLS + 1, "[%.*s: %s]", width - 6, p->site[0] ? p->site : p->url, p->why); attrs[0] = C_META; return 1; }
+    if (p->state != PIC_READY) { snprintf(lines[0], UI_MAX_COLS + 1, "[loading preview...]"); attrs[0] = C_META; return 1; }
+    if (!p->title[0] && !p->desc[0]) return 0;
+    if (p->site[0]) { snprintf(lines[n], UI_MAX_COLS + 1, "%c %.*s", 0xF9, width - 2, p->site); attrs[n++] = C_NOTICE_DOT; }
+    {
+        ui_seg segs[8];
+        int k, c2;
+        if (p->title[0]) {
+            c2 = ui_wrap((const unsigned char *)p->title, (int)strlen(p->title), width - 2, segs, 8);
+            for (k = 0; k < c2 && k < 2 && n < CARD_MAX_LINES; k++) { snprintf(lines[n], UI_MAX_COLS + 1, "  %.*s%s", segs[k].len, p->title + segs[k].start, (k == 1 && c2 > 2) ? "..." : ""); attrs[n++] = 0x0F; }
+        }
+        if (p->desc[0]) {
+            c2 = ui_wrap((const unsigned char *)p->desc, (int)strlen(p->desc), width - 2, segs, 8);
+            for (k = 0; k < c2 && k < 2 && n < CARD_MAX_LINES; k++) { snprintf(lines[n], UI_MAX_COLS + 1, "  %.*s%s", segs[k].len, p->desc + segs[k].start, (k == 1 && c2 > 2) ? "..." : ""); attrs[n++] = C_TEXT; }
+        }
+    }
+    return n;
+}
+
+/* Rows a message's pictures, card and audio lines take. */
 static int pic_rows(const chat *c, const chat_msg *m, int width) {
     int i, rows = 0;
     for (i = 0; i < m->npics; i++) {
         const pic *p = pics_find((pic_cache *)&c->pics, m->pics[i]);
         if (!p) continue;
-        rows += p->state == PIC_READY ? p->rows : 1;
+        rows += (p->state == PIC_READY && !p->veiled) ? p->rows : 1;
     }
-    (void)width;
+    if (m->card[0]) {
+        const pic *p = pics_find((pic_cache *)&c->pics, m->card);
+        if (p) {
+            char lines[CARD_MAX_LINES][UI_MAX_COLS + 1];
+            unsigned char attrs[CARD_MAX_LINES];
+            rows += card_lines(p, width, lines, attrs);
+        }
+    }
+    rows += m->naudios;
     return rows;
 }
 
@@ -215,11 +249,12 @@ static int draw_pics(const chat *c, screen *s, const chat_msg *m, int x, int xen
     for (i = 0; i < m->npics; i++) {
         pic *p = pics_find((pic_cache *)&c->pics, m->pics[i]);
         if (!p) continue;
-        if (p->state != PIC_READY) {
+        if (p->state != PIC_READY || p->veiled) {
             const char *name = strrchr(m->pics[i], '/');
             char line[160];
             name = name ? name + 1 : m->pics[i];
-            if (p->state == PIC_FAILED) snprintf(line, sizeof line, "[picture %.40s: %s]", name, p->why);
+            if (p->veiled) snprintf(line, sizeof line, "[NSFW picture %.40s - /nsfw to show]", name);
+            else if (p->state == PIC_FAILED) snprintf(line, sizeof line, "[picture %.40s: %s]", name, p->why);
             else snprintf(line, sizeof line, "[loading picture %.40s...]", name);
             if (y >= top && y <= bottom) {
                 int len = (int)strlen(line), lx = mine ? xend - len : x;
@@ -235,6 +270,34 @@ static int draw_pics(const chat *c, screen *s, const chat_msg *m, int x, int xen
             for (cx = 0; cx < p->cols; cx++)
                 put_rgb(s, lx + cx, y, 0xDF, p->top[r * p->cols + cx], p->bot[r * p->cols + cx]);
         }
+    }
+    /* The link card. */
+    if (m->card[0]) {
+        pic *p = pics_find((pic_cache *)&c->pics, m->card);
+        if (p) {
+            char lines[CARD_MAX_LINES][UI_MAX_COLS + 1];
+            unsigned char attrs[CARD_MAX_LINES];
+            int n = card_lines(p, xend - x, lines, attrs), k;
+            for (k = 0; k < n; k++, y++) {
+                int len = (int)strlen(lines[k]), lx = mine ? xend - len : x;
+                if (y < top || y > bottom) continue;
+                if (lx < 0) lx = 0;
+                draw_text(s, lx, y, lines[k], attrs[k], xend - lx);
+            }
+        }
+    }
+    /* Audio links: a play line each. */
+    for (i = 0; i < m->naudios; i++, y++) {
+        const char *name = strrchr(m->audios[i], '/');
+        char line[160];
+        int len, lx;
+        name = name ? name + 1 : m->audios[i];
+        snprintf(line, sizeof line, "%c %.60s  /play", 0x0E, name);
+        len = (int)strlen(line);
+        lx = mine ? xend - len : x;
+        if (y < top || y > bottom) continue;
+        if (lx < 0) lx = 0;
+        draw_text(s, lx, y, line, 0x0B, xend - lx);
     }
     return y;
 }
