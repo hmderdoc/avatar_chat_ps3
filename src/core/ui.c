@@ -52,8 +52,10 @@ static void fill_row(screen *s, int y, unsigned char ch, unsigned char attr) {
     for (x = 0; x < s->cols; x++) put(s, x, y, ch, attr);
 }
 
-/* Draw UTF-8 text (converted to CP437); returns the x after the text. */
-static int text(screen *s, int x, int y, const char *utf8, unsigned char attr, int maxw) {
+/* Draw UTF-8 text (converted to CP437); returns the x after it. Not named
+ * text(): on the PPU ELFv1 ABI a function f gets a code symbol .f, and
+ * .text is taken. */
+static int draw_text(screen *s, int x, int y, const char *utf8, unsigned char attr, int maxw) {
     unsigned char tmp[UI_MAX_COLS];
     size_t n = cp437_from_utf8(utf8, strlen(utf8), tmp, sizeof tmp), i;
     if (maxw >= 0 && (int)n > maxw) n = (size_t)(maxw > 0 ? maxw : 0);
@@ -188,7 +190,7 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
     if (u->compact) {
         for (i = b->first; i <= b->last; i++) {
             const chat_msg *m = chat_msg_at(c, i);
-            char age[16];
+            char age[24];
             int indent = 5 + (int)strlen(m->name) + 2, n, width = cols - indent;
             if (width < 10) { width = 10; indent = cols - 10; }
             n = ui_wrap(m->text, m->textlen, width, segs, MAX_SEGS);
@@ -199,8 +201,8 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
                     int x = 0;
                     char tmp[24];
                     snprintf(tmp, sizeof tmp, "%4s ", age);
-                    x = text(s, x, y, tmp, C_META, -1);
-                    x = text(s, x, y, m->name, name_attr, -1);
+                    x = draw_text(s, x, y, tmp, C_META, -1);
+                    x = draw_text(s, x, y, m->name, name_attr, -1);
                     put(s, x, y, m->kind == MSG_PRIVATE ? '>' : ':', C_META);
                 }
                 raw(s, indent, y, m->text + segs[k].start, segs[k].len, text_attr);
@@ -212,7 +214,7 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
     /* Avatar mode: gutter on the left, name line, then the texts. */
     {
         int x, width = cols - GUTTER - 1;
-        char age[16];
+        char age[24];
         for (k = 0; k < AVATAR_H; k++) {
             int yy = y0 + k;
             if (!ROW_OK(yy)) continue;
@@ -220,13 +222,13 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
             else placeholder_row(s, 1, yy, m0->name, k);
         }
         if (ROW_OK(y)) {
-            x = text(s, GUTTER, y, m0->name, name_attr, width);
+            x = draw_text(s, GUTTER, y, m0->name, name_attr, width);
             if (m0->host[0]) {
-                x = text(s, x, y, " @", C_META, -1);
-                x = text(s, x, y, m0->host, C_META, cols - x - 8);
+                x = draw_text(s, x, y, " @", C_META, -1);
+                x = draw_text(s, x, y, m0->host, C_META, cols - x - 8);
             }
             age_text(age, sizeof age, chat_msg_at(c, b->last)->time, now);
-            if (age[0]) text(s, cols - 1 - (int)strlen(age), y, age, C_META, -1);
+            if (age[0]) draw_text(s, cols - 1 - (int)strlen(age), y, age, C_META, -1);
         }
         y++;
         for (i = b->first; i <= b->last; i++) {
@@ -281,13 +283,13 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
 
     /* Header */
     fill_row(s, 0, ' ', C_HEADER);
-    x = text(s, 1, 0, "Avatar Chat", C_HEADER, -1);
-    x = text(s, x, 0, "  #", C_HEADER_DIM, -1);
-    x = text(s, x, 0, c->channel, C_HEADER, -1);
+    x = draw_text(s, 1, 0, "Avatar Chat", C_HEADER, -1);
+    x = draw_text(s, x, 0, "  #", C_HEADER_DIM, -1);
+    x = draw_text(s, x, 0, c->channel, C_HEADER, -1);
     snprintf(tmp, sizeof tmp, "  %d user%s", c->users, c->users == 1 ? "" : "s");
-    x = text(s, x, 0, tmp, C_HEADER_DIM, -1);
+    x = draw_text(s, x, 0, tmp, C_HEADER_DIM, -1);
     snprintf(tmp, sizeof tmp, "%s  %s ", c->nick[0] ? c->nick : "", conn ? conn : "");
-    text(s, cols - 1 - (int)strlen(tmp), 0, tmp, C_HEADER_DIM, -1);
+    draw_text(s, cols - 1 - (int)strlen(tmp), 0, tmp, C_HEADER_DIM, -1);
 
     /* Input: one or two rows depending on length. */
     input_rows = (u->inlen + 2) / (cols - 1) + 1;
@@ -304,7 +306,7 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
         const char *prompt = u->mode == UI_ASK_NICK ? "Nick: " : "> ";
         int plen = (int)strlen(prompt);
         for (i = 0; i < input_rows; i++) fill_row(s, in_y + i, ' ', C_TEXT);
-        text(s, 0, in_y, prompt, C_PROMPT, -1);
+        draw_text(s, 0, in_y, prompt, C_PROMPT, -1);
         px = plen;
         s->cur_x = px; s->cur_y = py;
         for (i = 0; i < u->inlen; i++) {
@@ -320,16 +322,16 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
     /* Status bar. */
     fill_row(s, status_y, ' ', C_STATUS);
     if (u->status[0] && (u->status_until == 0 || now_ms < u->status_until)) {
-        text(s, 1, status_y, u->status, C_STATUS_HOT, cols - 2);
+        draw_text(s, 1, status_y, u->status, C_STATUS_HOT, cols - 2);
     } else {
         u->status[0] = 0;
         if (u->mode == UI_ASK_NICK) {
-            text(s, 1, status_y, "Type a nickname (letters, digits, - _ space; up to 25) and press Enter.", C_STATUS, cols - 2);
+            draw_text(s, 1, status_y, "Type a nickname (letters, digits, - _ space; up to 25) and press Enter.", C_STATUS, cols - 2);
         } else {
             snprintf(tmp, sizeof tmp, "Enter sends  /help commands  PgUp/PgDn scroll  %s  Start or /quit exits  %s",
                      u->compact ? "Select: avatars" : "Select: compact",
                      u->scroll > 0 ? "[scrolled]" : "");
-            text(s, 1, status_y, tmp, C_STATUS, cols - 2);
+            draw_text(s, 1, status_y, tmp, C_STATUS, cols - 2);
         }
     }
     u->drawn_seq = c->seq;
