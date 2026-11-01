@@ -9,6 +9,7 @@
 #include "avatar.h"
 #include "art.h"
 #include "pics.h"
+#include "tv.h"
 
 #define CHAT_RING     200
 #define CHAT_TEXT     1024
@@ -116,6 +117,18 @@ typedef struct chat {
     /* /play: the audio link to start, as a URL the main loop picks up. */
     char want_play[PIC_URL];
     int want_stop;
+
+    /* The TV lounge: where the viewed room is tuned, and whether we opted
+     * out. tv_seq bumps on every change so the main loop reconnects. */
+    struct {
+        int on;
+        char host[128];
+        int port;
+        char channel[64];
+        char by[CHAT_NAME];
+        int opted_out;
+        unsigned seq;
+    } tv;
 
     /* Art received ([BITMAP|...]), newest last; a ring of CHAT_ARTS. */
     chat_art arts[CHAT_ARTS];

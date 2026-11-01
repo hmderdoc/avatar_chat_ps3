@@ -15,6 +15,7 @@ static char out_buf[OUT_CAP];
 static char arena_mem[ARENA_CAP];
 
 static long long now_ms(chat *c) { return c->io.now_ms ? c->io.now_ms(c->io.ctx) : 0; }
+static void apply_tuner(chat *c, const char *str, const char *by, int announce);
 
 static void emit(chat *c, size_t n) {
     if (n > 0 && c->io.send) c->io.send(c->io.ctx, out_buf, n);
@@ -35,6 +36,7 @@ static void copy_cp437(char *dst, size_t cap, const char *utf8) {
 
 static void loc_messages(char *out, size_t cap, const char *name) { snprintf(out, cap, "channels.%s.messages", name); }
 static void loc_history(char *out, size_t cap, const char *name) { snprintf(out, cap, "channels.%s.history", name); }
+static void loc_tuner(char *out, size_t cap, const char *name) { snprintf(out, cap, "channels.%s.tvtuner", name); }
 
 void chat_init(chat *c, const chat_io *io) {
     memset(c, 0, sizeof *c);
@@ -264,6 +266,12 @@ static void send_slice(chat *c, const char *name, int n) {
     emit(c, proto_slice(out_buf, OUT_CAP, loc, -n));
 }
 
+static void send_tuner_query(chat *c, const char *name) {
+    char loc[128];
+    loc_tuner(loc, sizeof loc, name);
+    emit(c, proto_slice(out_buf, OUT_CAP, loc, -1));
+}
+
 static void send_who(chat *c, const char *name) {
     char loc[128];
     loc_messages(loc, sizeof loc, name);
@@ -281,6 +289,7 @@ void chat_connected(chat *c) {
     }
     if (c->nick[0]) send_subscribe(c, c->nick);
     if (c->history_count > 0) send_slice(c, c->channel, c->history_count);
+    send_tuner_query(c, c->channel);
     send_who(c, c->channel);
 }
 
@@ -314,9 +323,12 @@ static void view_room(chat *c, const char *name) {
     c->users = 0;
     c->roster[0] = 0;
     c->seq++;
+    if (c->tv.on) { c->tv.on = 0; c->tv.seq++; }
+    c->tv.opted_out = 0;
     if (c->connected) {
         chat_notice(c, "Joining #%s ...", c->channel);
         if (c->history_count > 0) send_slice(c, c->channel, c->history_count);
+        send_tuner_query(c, c->channel);
         send_who(c, c->channel);
     } else {
         chat_notice(c, "Will join #%s when connected.", c->channel);
@@ -403,7 +415,7 @@ static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm,
 }
 
 static void help(chat *c) {
-    chat_notice(c, "Commands: /join <room>  /leave [room]  /next  /prev  /rooms  /who  /msg <name> <text>  /r <text>  /img [N]  /play [N|list]  /stop  /nsfw  /compact  /quit");
+    chat_notice(c, "Commands: /join /leave /next /prev /rooms /who /msg <name> <text> /r <text> /img [N] /play [N|list] /stop /nsfw /tvtuner <host> <port> <chan> /tvon /tvoff /compact /quit");
 }
 
 void chat_input(chat *c, const unsigned char *line, size_t n) {
@@ -433,6 +445,32 @@ void chat_input(chat *c, const unsigned char *line, size_t n) {
         return;
     }
     if (ieq(p, "stop")) { c->want_stop = 1; return; }
+    if (ieq(p, "tvoff")) { if (!c->tv.on) chat_notice(c, "The room has no TV on."); c->tv.opted_out = 1; c->tv.seq++; c->seq++; return; }
+    if (ieq(p, "tvon")) { if (!c->tv.on) chat_notice(c, "The room has no TV on; /tvtuner <host> <port> <channel> tunes one."); c->tv.opted_out = 0; c->tv.seq++; c->seq++; return; }
+    if (ieq(p, "tv")) { c->tv.opted_out = !c->tv.opted_out; c->tv.seq++; c->seq++; return; }
+    if (strncmp(p, "tvtuner ", 8) == 0 || ieq(p, "tvtuner")) {
+        char host[128], chan[64], marker[300], loc[128];
+        int port = 0;
+        long long t = now_ms(c);
+        if (!c->connected) { chat_notice(c, "Not connected."); return; }
+        p += 7;
+        while (*p == ' ') p++;
+        if (ieq(p, "off")) snprintf(marker, sizeof marker, "[TVTUNER|off]");
+        else if (sscanf(p, "%127s %d %63s", host, &port, chan) == 3 && port > 0 && port <= 65535) snprintf(marker, sizeof marker, "[TVTUNER|%s|%d|%s]", host, port, chan);
+        else { chat_notice(c, "Usage: /tvtuner <host> <port> <channel>  or  /tvtuner off"); return; }
+        /* Live to the room, then the durable record (WRITE [] then PUSH, the
+         * idiom both servers accept), as the door does. */
+        loc_messages(loc, sizeof loc, c->channel);
+        emit(c, proto_message(out_buf, OUT_CAP, "WRITE", loc, c->nick_json, marker, t));
+        loc_tuner(loc, sizeof loc, c->channel);
+        {
+            size_t n = snprintf(out_buf, OUT_CAP, "{\"scope\":\"chat\",\"func\":\"QUERY\",\"oper\":\"WRITE\",\"location\":\"%s\",\"data\":[],\"lock\":2,\"timeout\":-1}\r\n", loc);
+            emit(c, n);
+        }
+        emit(c, proto_message(out_buf, OUT_CAP, "PUSH", loc, c->nick_json, marker, t));
+        apply_tuner(c, marker, c->nick, 1);
+        return;
+    }
     if (ieq(p, "play") || strncmp(p, "play ", 5) == 0) {
         char links[9][PIC_URL];
         int n = chat_audio_links(c, links, 9), k = 1;
@@ -609,6 +647,28 @@ static void take_style(chat_msg *m, const json_val *style) {
     }
 }
 
+/* A tuner marker: tune the room (or turn its TV off). announce=1 adds a
+ * notice; history replays stay quiet. */
+static void apply_tuner(chat *c, const char *str, const char *by, int announce) {
+    char host[128], channel[64];
+    int port = 0, rc = tv_parse_marker(str, host, sizeof host, &port, channel, sizeof channel);
+    if (rc == 0) return;
+    if (rc == 2) {
+        if (c->tv.on) { c->tv.on = 0; c->tv.seq++; c->seq++; }
+        if (announce) chat_notice(c, "%s turned off the TV.", *by ? by : "Someone");
+        return;
+    }
+    c->tv.on = 1;
+    snprintf(c->tv.host, sizeof c->tv.host, "%s", host);
+    c->tv.port = port;
+    snprintf(c->tv.channel, sizeof c->tv.channel, "%s", channel);
+    snprintf(c->tv.by, sizeof c->tv.by, "%s", by ? by : "");
+    c->tv.opted_out = 0;
+    c->tv.seq++;
+    c->seq++;
+    if (announce) chat_notice(c, "%s tuned the room to %s:%d/%s  (/tvoff to leave, /tvon to rejoin)", *by ? by : "Someone", host, port, channel);
+}
+
 /* Appends one wire message to the ring; live=1 for an UPDATE, 0 for history. */
 static void take_message(chat *c, const json_val *msg, int private_box, int live) {
     const json_val *nick = json_get(msg, "nick");
@@ -625,7 +685,7 @@ static void take_message(chat *c, const json_val *msg, int private_box, int live
     self = same_user(c, name, host, mailbox);
     if (self && live && recent_self(c, t, str)) return;
 
-    if (is_marker(str, "[TVTUNER|")) return;
+    if (is_marker(str, "[TVTUNER|")) { apply_tuner(c, str, name, live); return; }
     if (art_is_envelope(str)) {
         static art_image tmp;
         char from[CHAT_NAME];
@@ -714,7 +774,15 @@ static void handle_response(chat *c, const proto_packet *pk) {
     if (ieq(pk->oper, "SLICE")) {
         const json_val *m;
         int shown = 0;
-        if (!split_location(pk->location, name, sizeof name, &leaf) || strcmp(leaf, "history") != 0) return;
+        if (!split_location(pk->location, name, sizeof name, &leaf)) return;
+        if (strcmp(leaf, "tvtuner") == 0) {
+            /* The durable TV state: the last tune/off event. */
+            if (!ieq(name, c->channel) || !pk->data || pk->data->type != J_ARRAY) return;
+            for (m = pk->data->first; m; m = m->next)
+                if (m->type == J_OBJECT) apply_tuner(c, json_str(json_get(m, "str"), ""), json_str(json_get(json_get(m, "nick"), "name"), ""), 0);
+            return;
+        }
+        if (strcmp(leaf, "history") != 0) return;
         if (!ieq(name, c->channel) || !pk->data || pk->data->type != J_ARRAY) return;
         for (m = pk->data->first; m; m = m->next) {
             if (m->type != J_OBJECT) continue;

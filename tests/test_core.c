@@ -17,6 +17,7 @@
 #include "vectors_png.h"
 #include "vectors_gif.h"
 #include "core/gif.h"
+#include "core/tv.h"
 #include "core/png.h"
 #include "core/pics.h"
 
@@ -571,6 +572,62 @@ static void test_gif(void) {
     CHECK(!gif_is(png_rgb, sizeof png_rgb));
 }
 
+static void test_tv(void) {
+    static unsigned char buf[TV_MAX_MSG];
+    static tv_consumer t;
+    unsigned char hello[64], msg[4 + 9 + 3 + 2 * 2 * 2 * 3], au[4 + 23 + 4];
+    char host[128], chan[64];
+    int port, i;
+    size_t n = tv_hello(hello, sizeof hello, "lobby", 1);
+    CHECK(n == 4 + 2 + 5 + 1 && hello[3] == 8 && hello[4] == 0x02 && hello[5] == 5 && memcmp(hello + 6, "lobby", 5) == 0 && hello[11] == 1);
+    tv_init(&t, buf);
+    /* A 2x2 frame with caption "hi!": top row red/green, bottom blue/white. */
+    memset(msg, 0, sizeof msg);
+    msg[3] = sizeof msg - 4; msg[4] = 0x10; msg[6] = 2; msg[8] = 2; msg[9] = 0; msg[10] = 0; msg[12] = 3;
+    memcpy(msg + 13, "hi!", 3);
+    { unsigned char px[] = { 255,0,0, 0,255,0,  0,0,255, 255,255,255,  10,10,10, 20,20,20,  30,30,30, 40,40,40 }; memcpy(msg + 16, px, sizeof px); }
+    /* Feed it in two halves. */
+    CHECK(tv_feed(&t, msg, 7) == 0);
+    CHECK(tv_feed(&t, msg + 7, sizeof msg - 7) == 1);
+    CHECK(t.frame.cols == 2 && t.frame.rows == 2 && strcmp(t.frame.caption, "hi!") == 0);
+    CHECK(t.frame.top[0] == 0xFF0000 && t.frame.top[1] == 0x00FF00 && t.frame.bot[0] == 0x0000FF && t.frame.bot[1] == 0xFFFFFF && t.frame.top[2] == 0x0A0A0A && t.frame.bot[3] == 0x282828);
+    /* An audio chunk. */
+    memset(au, 0, sizeof au);
+    au[3] = sizeof au - 4; au[4] = 0x11; au[5] = 1; au[6] = 2; au[7] = 0; au[8] = 0; au[9] = 0xAC; au[10] = 0x44;
+    memcpy(au + 4 + 23, "RIFF", 4);
+    CHECK(tv_feed(&t, au, sizeof au) == 0 && t.have_audio && t.audio_rate == 44100 && t.audio_channels == 2 && t.audio_n == 4 && memcmp(t.audio, "RIFF", 4) == 0);
+    /* A bad length drops the stream. */
+    { unsigned char bad[4] = { 0xFF, 0xFF, 0xFF, 0xFF }; CHECK(tv_feed(&t, bad, 4) == -1); }
+    /* Markers. */
+    CHECK(tv_parse_marker("[TVTUNER|tv.example.org|7777|movies]", host, sizeof host, &port, chan, sizeof chan) == 1 && strcmp(host, "tv.example.org") == 0 && port == 7777 && strcmp(chan, "movies") == 0);
+    CHECK(tv_parse_marker("[TVTUNER|off]", host, sizeof host, &port, chan, sizeof chan) == 2);
+    CHECK(tv_parse_marker("[TVTUNER|x|99999|c]", host, sizeof host, &port, chan, sizeof chan) == 0 && tv_parse_marker("hello", host, sizeof host, &port, chan, sizeof chan) == 0);
+    /* Through the chat: a live marker tunes, history is quiet, /tvoff opts out, /tvtuner writes three packets. */
+    {
+        static chat c;
+        chat_io io;
+        char buf2[256];
+        unsigned seq;
+        io.ctx = NULL; io.send = cap_send; io.now_ms = cap_now;
+        chat_init(&c, &io);
+        chat_set_identity(&c, "SiX", "PS3", NULL);
+        c.connected = 1;
+        feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"bob\"},\"str\":\"[TVTUNER|tv.x|7777|movies]\",\"time\":5}}");
+        CHECK(c.tv.on && strcmp(c.tv.host, "tv.x") == 0 && c.tv.port == 7777 && strcmp(c.tv.channel, "movies") == 0 && strcmp(c.tv.by, "bob") == 0);
+        CHECK(strstr(last_text(&c, buf2, sizeof buf2), "bob tuned the room to tv.x:7777/movies"));
+        seq = c.tv.seq;
+        chat_input(&c, (const unsigned char *)"/tvoff", 6);
+        CHECK(c.tv.opted_out && c.tv.seq == seq + 1);
+        outlen = 0;
+        chat_input(&c, (const unsigned char *)"/tvtuner off", 12);
+        CHECK(!c.tv.on && strstr(outbox, "\"str\":\"[TVTUNER|off]\"") && strstr(outbox, "\"location\":\"channels.main.tvtuner\",\"data\":[]") && strstr(outbox, "\"oper\":\"PUSH\",\"location\":\"channels.main.tvtuner\""));
+        feed(&c, "{\"func\":\"RESPONSE\",\"oper\":\"SLICE\",\"location\":\"channels.main.tvtuner\",\"data\":[{\"nick\":{\"name\":\"amy\"},\"str\":\"[TVTUNER|a.b|1|c]\",\"time\":1}]}");
+        CHECK(c.tv.on && strcmp(c.tv.host, "a.b") == 0 && !c.tv.opted_out);
+        for (i = 0; i < c.count; i++) if (strstr(last_text(&c, buf2, sizeof buf2), "amy tuned")) break;
+        CHECK(i == c.count); /* quiet */
+    }
+}
+
 static void test_config(void) {
     app_config cfg;
     FILE *f = fopen("build-host/test.ini", "w");
@@ -598,6 +655,7 @@ int main(void) {
     test_png_and_pics();
     test_gif();
     test_cards_and_nsfw();
+    test_tv();
     test_config();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

@@ -62,6 +62,9 @@ typedef struct {
     int osk_open;
     /* The built-in pad keyboard: drawn in cells, no firmware dialog. */
     int kb_open, kb_row, kb_col, kb_shift;
+    /* TV lounge. */
+    const tv_frame *tv;
+    char tv_status[96];
 } ui;
 
 /* Open the built-in pad keyboard (used when the system one is missing or
@@ -79,6 +82,9 @@ void ui_set_status(ui *u, long long now_ms, long long for_ms, const char *fmt, .
 /* Returns 1 when the screen needs redrawing. nick_out receives the name
  * entered in UI_ASK_NICK mode (then mode becomes UI_CHAT). */
 int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nick_cap);
+
+/* The TV frame the lounge shows (owned by the main loop); NULL when none. */
+void ui_set_tv(ui *u, const tv_frame *f, const char *status);
 
 /* Lay the chat out into s (s->cols/rows set by the platform first). conn is
  * a short connection state label, e.g. "online" or "connecting". */

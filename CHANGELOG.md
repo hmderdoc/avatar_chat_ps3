@@ -4,6 +4,46 @@ Releases are cut from the Actions tab (release > Run workflow with the
 version), which builds the `.pkg` and publishes the matching section of
 this file as the release notes.
 
+## v0.3.0-alpha.1
+
+The rest of the door's transcript features, and a keyboard that needs no
+firmware dialog. Still untested on real hardware; it runs in RPCS3.
+
+### Added
+
+- **Built-in pad keyboard.** A keyboard drawn in cells: D-pad moves,
+  Cross types, Square backspace, Triangle space, L1/R1 shift, Start
+  sends, Circle closes. It takes over when the system on-screen keyboard
+  fails or does not appear within six seconds, and `osk = builtin` in
+  the ini picks it outright. Every step of the system dialog request is
+  logged now.
+- **Audio links.** `.mp3 .ogg .oga .flac .wav` links get a play line;
+  `/play [N|list]` downloads the track and plays it through the PS3
+  audio port (MP3 via libmad, Vorbis, FLAC, WAV), `/stop` stops.
+- **TV lounge.** `[TVTUNER|host|port|channel]` markers tune the room to a
+  telnetvision feed; the picture fills the transcript area with the
+  caption bar and the newest chat lines over it, with the feed's sound.
+  `/tvoff` leaves, `/tvon` rejoins, `/tvtuner <host> <port> <chan>` or
+  `/tvtuner off` tunes for everyone. The durable room state
+  (`channels.<room>.tvtuner`) is read on join.
+- **Link cards.** The first plain link in a message shows site, title
+  and description from the page's OpenGraph, Twitter or plain tags.
+- **NSFW veil.** Pictures and cards from a line or link with a word on
+  the shell's list are held back until `/nsfw`; `nsfw_keywords` in the
+  ini overrides the list, `none` turns it off.
+- **GIF** pictures (first frame).
+
+### Not done
+
+- WebP pictures, `/play` of video files (the door runs ffmpeg for those;
+  the TV lounge covers shared video), uploads.
+
+### Controls
+
+Cross: Enter (empty line: keyboard). Circle: clear line / close.
+Triangle: keyboard. Square: art viewer. Select: compact view. Start:
+quit. D-pad Up/Down and L1/R1: scroll. D-pad Left/Right: switch rooms.
+
 ## v0.2.0-alpha.1
 
 The second alpha brings most of the door's transcript to the console.

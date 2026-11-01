@@ -11,6 +11,8 @@
 #include "core/proto.h"
 #include "core/avatar.h"
 #include "core/player.h"
+#include "core/tv.h"
+#include "core/wav.h"
 
 static chat g_chat;
 static ui g_ui;
@@ -177,6 +179,80 @@ static void pump_pictures(long long now) {
     }
 }
 
+/* ---- the TV lounge connection -------------------------------------------- */
+static struct {
+    int sock;
+    unsigned seq;              /* chat.tv.seq we connected for */
+    tv_consumer cons;
+    unsigned char *buf;
+    long long next_try;
+    char status[96];
+    int audio_open;
+} g_tv;
+
+static void tv_disconnect(void) {
+    if (g_tv.sock >= 0) plat_net_close(g_tv.sock);
+    g_tv.sock = -1;
+    if (g_tv.audio_open && g_audio.state != 2) plat_audio_close();
+    g_tv.audio_open = 0;
+}
+
+static void pump_tv(long long now) {
+    int want = g_chat.tv.on && !g_chat.tv.opted_out;
+    if (!g_tv.buf) { g_tv.buf = malloc(TV_MAX_MSG); if (!g_tv.buf) return; tv_init(&g_tv.cons, g_tv.buf); g_tv.sock = -1; }
+    if (g_tv.seq != g_chat.tv.seq) {
+        /* Tuned elsewhere, turned off, or toggled: start over. */
+        tv_disconnect();
+        tv_init(&g_tv.cons, g_tv.buf);
+        g_tv.seq = g_chat.tv.seq;
+        g_tv.next_try = 0;
+        g_tv.status[0] = 0;
+        ui_set_tv(&g_ui, want ? &g_tv.cons.frame : NULL, "");
+    }
+    if (!want) { if (g_tv.sock >= 0) tv_disconnect(); return; }
+    if (g_tv.sock < 0) {
+        char err[96];
+        unsigned char hello[300];
+        size_t hn;
+        if (now < g_tv.next_try) return;
+        g_tv.next_try = now + 5000;
+        snprintf(g_tv.status, sizeof g_tv.status, "connecting to %.60s:%d...", g_chat.tv.host, g_chat.tv.port);
+        ui_set_tv(&g_ui, &g_tv.cons.frame, g_tv.status);
+        g_tv.sock = plat_net_connect(g_chat.tv.host, g_chat.tv.port, err, sizeof err);
+        if (g_tv.sock < 0) { snprintf(g_tv.status, sizeof g_tv.status, "can't reach %.40s:%d (%.30s)", g_chat.tv.host, g_chat.tv.port, err); ui_set_tv(&g_ui, &g_tv.cons.frame, g_tv.status); plat_log("tv: %s", g_tv.status); return; }
+        hn = tv_hello(hello, sizeof hello, g_chat.tv.channel, 1);
+        if (hn == 0 || plat_net_send_all(g_tv.sock, (const char *)hello, hn) != 0) { tv_disconnect(); return; }
+        snprintf(g_tv.status, sizeof g_tv.status, "waiting for %s", g_chat.tv.channel);
+        ui_set_tv(&g_ui, &g_tv.cons.frame, g_tv.status);
+        plat_log("tv: connected to %s:%d/%s", g_chat.tv.host, g_chat.tv.port, g_chat.tv.channel);
+        return;
+    }
+    {
+        char buf[16384];
+        int got, budget = 8;
+        while (budget-- > 0 && (got = plat_net_recv(g_tv.sock, buf, sizeof buf)) != 0) {
+            int frames;
+            if (got < 0) { snprintf(g_tv.status, sizeof g_tv.status, "feed dropped; retrying"); ui_set_tv(&g_ui, &g_tv.cons.frame, g_tv.status); tv_disconnect(); g_tv.next_try = now + 3000; return; }
+            frames = tv_feed(&g_tv.cons, (const unsigned char *)buf, (size_t)got);
+            if (frames > 0) { g_ui.dirty = 1; if (g_tv.status[0]) { g_tv.status[0] = 0; ui_set_tv(&g_ui, &g_tv.cons.frame, ""); } }
+            if (frames < 0) { snprintf(g_tv.status, sizeof g_tv.status, "bad data from the feed"); tv_disconnect(); g_tv.next_try = now + 5000; return; }
+            if (g_tv.cons.have_audio && g_audio.state != 2 && g_tv.cons.audio_n > 44) {
+                /* Each chunk is a small sound file; WAV plays straight through the port. */
+                wav_reader w;
+                char err[64];
+                if (wav_open(&w, g_tv.cons.audio, g_tv.cons.audio_n, err, sizeof err)) {
+                    static short pcm[48000 * 2];
+                    int n = wav_pull(&w, pcm, (int)(sizeof pcm / sizeof pcm[0] / (size_t)w.channels));
+                    if (!g_tv.audio_open || g_tv.audio_open != w.rate * 10 + w.channels) {
+                        if (plat_audio_open(w.rate, w.channels) == 0) g_tv.audio_open = w.rate * 10 + w.channels;
+                    }
+                    if (g_tv.audio_open && n > 0) plat_audio_write(pcm, n);
+                }
+            }
+        }
+    }
+}
+
 static int load_avatar(const app_config *cfg, unsigned char out[AVATAR_BYTES]) {
     char path[512];
     static unsigned char data[64 * 1024];
@@ -292,6 +368,7 @@ int main(int argc, char **argv) {
         }
         pump_pictures(now);
         pump_audio();
+        pump_tv(now);
 
         nick[0] = 0;
         if (g_ui.osk_open) {
@@ -348,6 +425,7 @@ int main(int argc, char **argv) {
     }
 
     audio_stop(NULL);
+    tv_disconnect();
     if (g_sock >= 0) plat_net_close(g_sock);
     plat_shutdown();
     return 0;

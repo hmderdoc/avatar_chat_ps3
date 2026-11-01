@@ -604,6 +604,60 @@ static void render_viewer(ui *u, chat *c, screen *s, long long now_ms) {
     u->dirty = 0;
 }
 
+void ui_set_tv(ui *u, const tv_frame *f, const char *status) {
+    u->tv = f;
+    snprintf(u->tv_status, sizeof u->tv_status, "%s", status ? status : "");
+    u->dirty = 1;
+}
+
+/* The lounge: the frame fills the transcript area (centred, cropped), the
+ * caption on its last row, and the newest lines of chat over its bottom
+ * in compact form. */
+static void render_lounge(ui *u, const chat *c, screen *s, int top, int bottom, long long now) {
+    int cols = s->cols, area_h = bottom - top, y, x, fw, fh, ox, oy;
+    char tmp[200];
+    const tv_frame *f = u->tv;
+    for (y = top; y <= bottom; y++) fill_row(s, y, ' ', 0x00);
+    if (f && f->cols > 0 && f->rows > 0 && f->frames > 0) {
+        fw = f->cols < cols ? f->cols : cols;
+        fh = f->rows < area_h ? f->rows : area_h;
+        ox = (cols - fw) / 2;
+        oy = top + (area_h - fh) / 2;
+        for (y = 0; y < fh; y++) {
+            int sy = y + (f->rows > area_h ? (f->rows - area_h) / 2 : 0);
+            for (x = 0; x < fw; x++) {
+                int sx = x + (f->cols > cols ? (f->cols - cols) / 2 : 0), k = sy * f->cols + sx;
+                put_rgb(s, ox + x, oy + y, 0xDF, f->top[k], f->bot[k]);
+            }
+        }
+    } else {
+        snprintf(tmp, sizeof tmp, "TV: %s", u->tv_status[0] ? u->tv_status : "connecting...");
+        draw_text(s, (cols - (int)strlen(tmp)) / 2, top + area_h / 2, tmp, C_META, -1);
+    }
+    /* Caption bar. */
+    fill_row(s, bottom, ' ', 0x70);
+    snprintf(tmp, sizeof tmp, " %.60s:%d/%.30s  %.90s", c->tv.host, c->tv.port, c->tv.channel, f && f->caption[0] ? f->caption : u->tv_status);
+    draw_text(s, 0, bottom, tmp, 0x70, cols);
+    draw_text(s, cols - 22, bottom, " /tvoff leaves the TV ", 0x78, 22);
+    /* The last few lines of chat, compact, over the bottom of the picture. */
+    {
+        int shown = 0, i;
+        for (i = c->count - 1; i >= 0 && shown < 3; i--) {
+            const chat_msg *m = chat_msg_at(c, i);
+            ui_seg segs[4];
+            int n, yy = bottom - 1 - shown, len;
+            char line[UI_MAX_COLS + 1];
+            if (now - m->time > 15000 && m->time > 0) break; /* popups linger 15 s */
+            if (m->kind == MSG_NOTICE) continue;
+            n = ui_wrap(m->text, m->textlen, cols - 4 - (int)strlen(m->name), segs, 4);
+            len = snprintf(line, sizeof line, " %s: %.*s%s ", m->name, segs[0].len, (const char *)m->text + segs[0].start, n > 1 ? "..." : "");
+            (void)len;
+            draw_text(s, 0, yy, line, 0x1F, cols);
+            shown++;
+        }
+    }
+}
+
 /* ---- the whole screen ------------------------------------------------ */
 
 void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *conn) {
@@ -641,8 +695,10 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
     status_y = rows - 1;
     in_y = status_y - input_rows;
 
-    /* Transcript between header and input (and the pad keyboard, if up). */
-    transcript(u, c, s, 1, in_y - 1 - (u->kb_open ? KB_ROWS : 0), now_ms);
+    /* Transcript between header and input (and the pad keyboard, if up),
+     * or the TV when the room is tuned and we have not opted out. */
+    if (c->tv.on && !c->tv.opted_out) render_lounge(u, c, s, 1, in_y - 1 - (u->kb_open ? KB_ROWS : 0), now_ms);
+    else transcript(u, c, s, 1, in_y - 1 - (u->kb_open ? KB_ROWS : 0), now_ms);
     if (u->kb_open) render_pad_keyboard(u, s, in_y - KB_ROWS);
 
     /* Input line(s). */
