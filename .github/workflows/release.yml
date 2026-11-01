@@ -1,13 +1,22 @@
-# Push a tag like v0.1.0 and the PS3 package is built and attached to a
-# GitHub Release, so nobody needs the toolchain to install it. Also runs
-# on demand from the Actions tab (workflow_dispatch) as a dry run that
-# only uploads artifacts.
+# Builds the PS3 package and attaches it to a GitHub Release, so nobody
+# needs the toolchain to install it. Two ways to cut one:
+#
+#   - push a tag like v0.1.0 (or v0.1.0-alpha.1 for a pre-release), or
+#   - Actions tab > release > Run workflow, and type the version; the
+#     workflow creates the tag at the chosen commit and the release.
+#
+# A version with a hyphen is marked as a pre-release.
 name: release
 
 on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. v0.1.0 or v0.1.0-alpha.1'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,29 +24,38 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check the version
+        run: |
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like v0.1.0 or v0.1.0-alpha.1, got '$VERSION'" >&2; exit 1 ;;
+          esac
       - name: Build with the ps3dev toolchain
         run: .github/scripts/build-ps3.sh
       - name: Bundle
         run: |
-          v="${GITHUB_REF_NAME}"
           mkdir -p dist/avatar_chat_ps3
           cp avatar_chat_ps3.pkg avatar_chat_ps3.self avatar_chat_ps3.ini README.md LICENSE LICENSE-moebius.txt dist/avatar_chat_ps3/
-          (cd dist && zip -r "avatar_chat_ps3_${v}.zip" avatar_chat_ps3)
-          cp avatar_chat_ps3.pkg "dist/avatar_chat_ps3_${v}.pkg"
+          (cd dist && zip -r "avatar_chat_ps3_${VERSION}.zip" avatar_chat_ps3)
+          cp avatar_chat_ps3.pkg "dist/avatar_chat_ps3_${VERSION}.pkg"
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
-          name: avatar_chat_ps3-release
+          name: avatar_chat_ps3-${{ env.VERSION }}
           path: dist/*
           if-no-files-found: error
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create the release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.VERSION }}
           files: |
             dist/avatar_chat_ps3_*.pkg
             dist/avatar_chat_ps3_*.zip
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.VERSION, '-') }}
