@@ -22,12 +22,34 @@
 #define C_STATUS_HOT 0x74
 
 #define GUTTER (AVATAR_W + 2)   /* avatar plus a gap */
+
+/* xterm's 256 colours: the CGA sixteen, the 6x6x6 cube, 24 greys. */
+const unsigned int ui_palette[256] = {
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+#define L(v) ((v) == 0 ? 0 : 55 + 40 * (v))
+#define CUBE(r, g, b) ((unsigned)L(r) << 16 | (unsigned)L(g) << 8 | (unsigned)L(b))
+#define ROW(r, g) CUBE(r, g, 0), CUBE(r, g, 1), CUBE(r, g, 2), CUBE(r, g, 3), CUBE(r, g, 4), CUBE(r, g, 5)
+#define PLANE(r) ROW(r, 0), ROW(r, 1), ROW(r, 2), ROW(r, 3), ROW(r, 4), ROW(r, 5)
+    PLANE(0), PLANE(1), PLANE(2), PLANE(3), PLANE(4), PLANE(5),
+#undef L
+#undef CUBE
+#undef ROW
+#undef PLANE
+#define G(i) ((unsigned)(8 + 10 * (i)) * 0x010101u)
+    G(0), G(1), G(2), G(3), G(4), G(5), G(6), G(7), G(8), G(9), G(10), G(11),
+    G(12), G(13), G(14), G(15), G(16), G(17), G(18), G(19), G(20), G(21), G(22), G(23),
+#undef G
+};
+
+unsigned int ui_rgb(unsigned char idx) { return ui_palette[idx]; }
 #define GROUP_MS (2 * 60000LL)
 
 void ui_init(ui *u) {
     memset(u, 0, sizeof *u);
     u->mode = UI_ASK_NICK;
     u->dirty = 1;
+    u->view_art = -1;
 }
 
 void ui_set_status(ui *u, long long now_ms, long long for_ms, const char *fmt, ...) {
@@ -41,10 +63,18 @@ void ui_set_status(ui *u, long long now_ms, long long for_ms, const char *fmt, .
 
 /* ---- drawing primitives --------------------------------------------- */
 
-static void put(screen *s, int x, int y, unsigned char ch, unsigned char attr) {
+static void put_rgb(screen *s, int x, int y, unsigned char ch, unsigned int fg, unsigned int bg) {
+    cell *c;
     if (x < 0 || y < 0 || x >= s->cols || y >= s->rows) return;
-    s->cells[y * s->cols + x].ch = ch;
-    s->cells[y * s->cols + x].attr = attr;
+    c = &s->cells[y * s->cols + x];
+    c->ch = ch;
+    c->fg = fg;
+    c->bg = bg;
+}
+
+/* CGA attribute: fg low nibble, bg high nibble. */
+static void put(screen *s, int x, int y, unsigned char ch, unsigned char attr) {
+    put_rgb(s, x, y, ch, ui_palette[attr & 15], ui_palette[(attr >> 4) & 7]);
 }
 
 static void fill_row(screen *s, int y, unsigned char ch, unsigned char attr) {
@@ -89,6 +119,30 @@ static void placeholder_row(screen *s, int x, int y, const char *name, int r) {
         else ch = ' ';
         put(s, x + c, y, ch, attr);
     }
+}
+
+/* The handle in its own colours, one per letter where the sender set one. */
+static int draw_name_only(screen *s, int x, int y, const chat_msg *m, unsigned char attr) {
+    int i;
+    for (i = 0; m->name[i]; i++) {
+        unsigned int fg = (i < m->ncolors && m->colors[i]) ? m->colors[i] : ui_palette[attr & 15];
+        put_rgb(s, x + i, y, (unsigned char)m->name[i], fg, ui_palette[(attr >> 4) & 7]);
+    }
+    return x + i;
+}
+
+/* Name plus the tag after it, as the door and the web page show it. */
+static int draw_name(screen *s, int x, int y, const chat_msg *m, unsigned char attr) {
+    x = draw_name_only(s, x, y, m, attr);
+    if (m->tag[0]) {
+        unsigned int fg = m->tag_fg ? m->tag_fg : ui_palette[C_META & 15];
+        unsigned int bg = m->tag_bg ? m->tag_bg : ui_palette[0];
+        int i;
+        x++;
+        for (i = 0; m->tag[i]; i++) put_rgb(s, x + i, y, (unsigned char)m->tag[i], fg, bg);
+        x += i;
+    }
+    return x;
 }
 
 /* ---- wrapping -------------------------------------------------------- */
@@ -199,10 +253,10 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
                 if (!ROW_OK(y)) continue;
                 if (k == 0) {
                     int x = 0;
-                    char tmp[24];
+                    char tmp[40];
                     snprintf(tmp, sizeof tmp, "%4s ", age);
                     x = draw_text(s, x, y, tmp, C_META, -1);
-                    x = draw_text(s, x, y, m->name, name_attr, -1);
+                    x = draw_name_only(s, x, y, m, name_attr);
                     put(s, x, y, m->kind == MSG_PRIVATE ? '>' : ':', C_META);
                 }
                 raw(s, indent, y, m->text + segs[k].start, segs[k].len, text_attr);
@@ -222,7 +276,7 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
             else placeholder_row(s, 1, yy, m0->name, k);
         }
         if (ROW_OK(y)) {
-            x = draw_text(s, GUTTER, y, m0->name, name_attr, width);
+            x = draw_name(s, GUTTER, y, m0, name_attr);
             if (m0->host[0]) {
                 x = draw_text(s, x, y, " @", C_META, -1);
                 x = draw_text(s, x, y, m0->host, C_META, cols - x - 8);
@@ -271,6 +325,48 @@ static int transcript(ui *u, const chat *c, screen *s, int top, int bottom, long
     return total;
 }
 
+/* ---- art viewer ------------------------------------------------------ */
+
+static void render_viewer(ui *u, chat *c, screen *s, long long now_ms) {
+    chat_art *a = chat_art_at(c, u->view_art);
+    int cols = s->cols, rows = s->rows, x, y, vis_w, vis_h, ox, oy;
+    char tmp[200], age[24];
+    if (!a) { u->view_art = -1; return; }
+    a->viewed = 1;
+    for (y = 0; y < rows; y++) fill_row(s, y, ' ', C_TEXT);
+    fill_row(s, 0, ' ', C_HEADER);
+    age_text(age, sizeof age, a->time, now_ms);
+    snprintf(tmp, sizeof tmp, "Art from %s in #%s  %dx%d  %s", a->from, a->room, a->img.w, a->img.h, age);
+    draw_text(s, 1, 0, tmp, C_HEADER, cols - 2);
+    snprintf(tmp, sizeof tmp, "%d/%d", u->view_art + 1, c->nart);
+    draw_text(s, cols - 1 - (int)strlen(tmp), 0, tmp, C_HEADER_DIM, -1);
+
+    vis_w = cols; vis_h = rows - 2;
+    if (u->art_dx > a->img.w - vis_w) u->art_dx = a->img.w - vis_w;
+    if (u->art_dy > a->img.h - vis_h) u->art_dy = a->img.h - vis_h;
+    if (u->art_dx < 0) u->art_dx = 0;
+    if (u->art_dy < 0) u->art_dy = 0;
+    ox = a->img.w < vis_w ? (vis_w - a->img.w) / 2 : 0;
+    oy = a->img.h < vis_h ? (vis_h - a->img.h) / 2 : 0;
+    for (y = 0; y < vis_h; y++) {
+        int ay = y + u->art_dy - oy;
+        if (ay < 0 || ay >= a->img.h) continue;
+        for (x = 0; x < vis_w; x++) {
+            int ax = x + u->art_dx - ox, k;
+            if (ax < 0 || ax >= a->img.w) continue;
+            k = ay * a->img.w + ax;
+            put_rgb(s, x, 1 + y, a->img.ch[k], ui_palette[a->img.fg[k]], ui_palette[a->img.bg[k]]);
+        }
+    }
+    fill_row(s, rows - 1, ' ', C_STATUS);
+    snprintf(tmp, sizeof tmp, "Circle/Esc closes   Left/Right: other pieces   %s",
+             (a->img.w > vis_w || a->img.h > vis_h) ? "Up/Down/PgUp/PgDn scroll" : "");
+    draw_text(s, 1, rows - 1, tmp, C_STATUS, cols - 2);
+    s->cur_x = s->cur_y = -1;
+    u->drawn_seq = c->seq;
+    u->dirty = 0;
+}
+
 /* ---- the whole screen ------------------------------------------------ */
 
 void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *conn) {
@@ -279,6 +375,7 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
 
     if (cols > UI_MAX_COLS) cols = s->cols = UI_MAX_COLS;
     if (rows > UI_MAX_ROWS) rows = s->rows = UI_MAX_ROWS;
+    if (u->view_art >= 0) { render_viewer(u, (chat *)c, s, now_ms); return; }
     for (y = 0; y < rows; y++) fill_row(s, y, ' ', C_TEXT);
 
     /* Header */
@@ -328,9 +425,14 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
         if (u->mode == UI_ASK_NICK) {
             draw_text(s, 1, status_y, "Type a nickname (letters, digits, - _ space; up to 25) and press Enter.", C_STATUS, cols - 2);
         } else {
-            snprintf(tmp, sizeof tmp, "Enter sends  /help commands  PgUp/PgDn scroll  %s  Start or /quit exits  %s",
-                     u->compact ? "Select: avatars" : "Select: compact",
-                     u->scroll > 0 ? "[scrolled]" : "");
+            int unviewed = chat_unviewed_art(c);
+            if (unviewed > 0)
+                snprintf(tmp, sizeof tmp, "%d new art piece%s: Square or /img to view   /help commands   Start or /quit exits",
+                         unviewed, unviewed == 1 ? "" : "s");
+            else
+                snprintf(tmp, sizeof tmp, "Enter sends  /help commands  PgUp/PgDn scroll  %s  Start or /quit exits  %s",
+                         u->compact ? "Select: avatars" : "Select: compact",
+                         u->scroll > 0 ? "[scrolled]" : "");
             draw_text(s, 1, status_y, tmp, C_STATUS, cols - 2);
         }
     }
@@ -351,11 +453,44 @@ static int valid_nick_char(unsigned char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == ' ';
 }
 
+static void open_art(ui *u, chat *c, int index) {
+    if (index < 0 || index >= c->nart) return;
+    u->view_art = index;
+    u->art_dx = u->art_dy = 0;
+    u->dirty = 1;
+}
+
+/* Keys while a piece of art is open. */
+static int viewer_key(ui *u, chat *c, int key) {
+    switch (key) {
+    case KEY_ESC: case KEY_ENTER: case KEY_VIEW_ART: case KEY_F3: u->view_art = -1; return 1;
+    case KEY_LEFT: if (u->view_art > 0) open_art(u, c, u->view_art - 1); return 1;
+    case KEY_RIGHT: if (u->view_art + 1 < c->nart) open_art(u, c, u->view_art + 1); return 1;
+    case KEY_UP: u->art_dy -= 1; return 1;
+    case KEY_DOWN: u->art_dy += 1; return 1;
+    case KEY_PGUP: u->art_dy -= 10; return 1;
+    case KEY_PGDN: u->art_dy += 10; return 1;
+    case KEY_HOME: u->art_dx -= 10; return 1;
+    case KEY_END: u->art_dx += 10; return 1;
+    case KEY_QUIT: u->quit = 1; return 1;
+    default: return 1;
+    }
+}
+
 int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nick_cap) {
     (void)now_ms;
     if (key == KEY_NONE) return 0;
     u->dirty = 1;
+    if (u->view_art >= 0) return viewer_key(u, c, key);
     switch (key) {
+    case KEY_VIEW_ART:
+    case KEY_F3: {
+        int i, pick = c->nart - 1;
+        if (c->nart == 0) { ui_set_status(u, now_ms, 3000, "No art has been sent here yet."); return 1; }
+        for (i = 0; i < c->nart; i++) if (!chat_art_at(c, i)->viewed) { pick = i; break; }
+        open_art(u, c, pick);
+        return 1;
+    }
     case KEY_QUIT:
         u->quit = 1;
         return 1;
@@ -371,7 +506,7 @@ int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nic
         u->scroll = 0;
         return 1;
     case KEY_F1:
-        if (u->mode == UI_CHAT) chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /compact  /quit");
+        if (u->mode == UI_CHAT) chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /img [N]  /compact  /quit");
         return 1;
     case KEY_PGUP: u->scroll += 5; return 1;
     case KEY_PGDN: u->scroll -= 5; if (u->scroll < 0) u->scroll = 0; return 1;
@@ -417,6 +552,7 @@ int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nic
         u->inlen = u->incur = 0;
         u->scroll = 0;
         if (c->toggle_compact) { c->toggle_compact = 0; u->compact = !u->compact; }
+        if (c->want_art >= 0) { open_art(u, c, c->want_art); c->want_art = -1; }
         if (c->want_quit) u->quit = 1;
         return 1;
     default:

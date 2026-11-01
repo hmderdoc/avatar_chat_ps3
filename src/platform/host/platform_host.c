@@ -87,12 +87,11 @@ void plat_screen_size(int *cols, int *rows) {
     if (*rows < 10) *rows = 10;
 }
 
-static const int ansi_of_cga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
-
 void plat_present(const screen *s) {
-    static char out[UI_MAX_COLS * UI_MAX_ROWS * 24];
+    static char out[UI_MAX_COLS * UI_MAX_ROWS * 48];
     size_t n = 0;
-    int y, x, last_attr = -1;
+    int y, x;
+    unsigned int last_fg = 0xFFFFFFFFu, last_bg = 0xFFFFFFFFu;
     n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[H");
     for (y = 0; y < s->rows; y++) {
         if (y) n += (size_t)snprintf(out + n, sizeof out - n, "\r\n");
@@ -100,11 +99,12 @@ void plat_present(const screen *s) {
             const cell *c = &s->cells[y * s->cols + x];
             char u[4];
             size_t k;
-            if (c->attr != last_attr) {
-                int fg = c->attr & 15, bg = (c->attr >> 4) & 7;
-                n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[0;%d%s;%dm",
-                                      30 + ansi_of_cga[fg & 7], fg & 8 ? ";1" : "", 40 + ansi_of_cga[bg]);
-                last_attr = c->attr;
+            if (c->fg != last_fg || c->bg != last_bg) {
+                n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[38;2;%u;%u;%u;48;2;%u;%u;%um",
+                                      (c->fg >> 16) & 255, (c->fg >> 8) & 255, c->fg & 255,
+                                      (c->bg >> 16) & 255, (c->bg >> 8) & 255, c->bg & 255);
+                last_fg = c->fg;
+                last_bg = c->bg;
             }
             k = cp437_byte_to_utf8(c->ch, u);
             if (n + k + 64 > sizeof out) break;
@@ -187,6 +187,7 @@ int plat_poll_key(void) {
                     case 'F': return KEY_END;
                     case 'P': return KEY_F1;
                     case 'Q': return KEY_F2;
+                    case 'R': return KEY_F3;
                     case '~':
                         switch (num) {
                         case 1: case 7: return KEY_HOME;
@@ -196,6 +197,7 @@ int plat_poll_key(void) {
                         case 6: return KEY_PGDN;
                         case 11: return KEY_F1;
                         case 12: return KEY_F2;
+                        case 13: return KEY_F3;
                         default: return KEY_NONE;
                         }
                     default: return KEY_NONE;

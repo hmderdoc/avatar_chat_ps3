@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include "proto.h"
 #include "avatar.h"
+#include "art.h"
 
 #define CHAT_RING     200
 #define CHAT_TEXT     1024
@@ -15,6 +16,7 @@
 #define CHAT_CHANNEL  33
 #define CHAT_PEERS    64
 #define CHAT_ROSTER   512
+#define CHAT_ARTS     8    /* art pieces kept for the viewer */
 
 typedef enum { MSG_CHAT, MSG_NOTICE, MSG_PRIVATE } msg_kind;
 
@@ -28,6 +30,12 @@ typedef struct {
     int has_avatar;
     long long time;                /* unix ms */
     int self;                      /* sent by us */
+    /* Handle style (nick.style): a colour per letter of the name, 0 = the
+     * default colour; and a short tag drawn after it. */
+    unsigned int colors[CHAT_NAME];
+    unsigned char ncolors;
+    char tag[13];
+    unsigned int tag_fg, tag_bg;
 } chat_msg;
 
 typedef struct {
@@ -41,6 +49,14 @@ typedef struct {
     char host[CHAT_HOST];
     char mailbox[96];   /* a standalone web user's name@origin, else "" */
 } chat_peer;
+
+typedef struct {
+    art_image img;
+    char from[CHAT_NAME];   /* CP437 */
+    char room[CHAT_CHANNEL];
+    long long time;
+    int viewed;
+} chat_art;
 
 typedef struct chat {
     chat_io io;
@@ -73,7 +89,17 @@ typedef struct chat {
     long long last_rx_ms, last_ping_ms;
     int want_quit;
     int toggle_compact;        /* UI hint set by /compact, cleared by the UI */
+
+    /* Art received ([BITMAP|...]), newest last; a ring of CHAT_ARTS. */
+    chat_art arts[CHAT_ARTS];
+    int art_head, nart;
+    int want_art;              /* UI hint: open the viewer on art index n (oldest = 0); -1 none */
 } chat;
+
+/* Art i, oldest first (0 .. nart-1), or NULL. */
+chat_art *chat_art_at(chat *c, int i);
+/* How many pieces have not been opened in the viewer. */
+int chat_unviewed_art(const chat *c);
 
 void chat_init(chat *c, const chat_io *io);
 

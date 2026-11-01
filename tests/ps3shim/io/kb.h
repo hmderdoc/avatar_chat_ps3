@@ -11,6 +11,7 @@
 #define KB_RAWKEY_TAB 0x2B
 #define KB_RAWKEY_F1 0x3A
 #define KB_RAWKEY_F2 0x3B
+#define KB_RAWKEY_F3 0x3C
 #define KB_RAWKEY_HOME 0x4A
 #define KB_RAWKEY_PAGE_UP 0x4B
 #define KB_RAWKEY_DELETE 0x4C

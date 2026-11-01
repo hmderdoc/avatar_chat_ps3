@@ -11,6 +11,9 @@
 #include "core/avatar.h"
 #include "core/ui.h"
 #include "config.h"
+#include "core/inflate.h"
+#include "core/art.h"
+#include "vectors.h"
 
 static int fails, checks;
 #define CHECK(cond) do { checks++; if (!(cond)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -180,6 +183,11 @@ static void test_chat(void) {
              "sR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEe\"},\"str\":\"hey SiX\",\"time\":1761000001000}}");
     CHECK(c.count == 4 && strcmp(last_text(&c, buf, sizeof buf), "hey SiX") == 0);
     CHECK(chat_msg_at(&c, 3)->has_avatar && chat_msg_at(&c, 3)->avatar[0] == 0xB1);
+    /* Handle style: a colour per letter, a tag. */
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"zed\",\"style\":{\"colors\":[\"#ff0000\",\"\",\"#0f0\",7],\"tag\":{\"text\":\"sysop\",\"fg\":\"#ffff55\",\"bg\":\"\"}}},\"str\":\"styled\",\"time\":1761000001500}}");
+    CHECK(c.count == 5 && chat_msg_at(&c, 4)->ncolors == 4 && chat_msg_at(&c, 4)->colors[0] == 0xff0000 && chat_msg_at(&c, 4)->colors[1] == 0 && chat_msg_at(&c, 4)->colors[2] == 0x00ff00 && chat_msg_at(&c, 4)->colors[3] == 0);
+    CHECK(strcmp(chat_msg_at(&c, 4)->tag, "sysop") == 0 && chat_msg_at(&c, 4)->tag_fg == 0xffff55 && chat_msg_at(&c, 4)->tag_bg == 0);
+    c.count--; /* keep the rest of the counts below unchanged */
     feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"SUBSCRIBE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":\"carol\",\"system\":\"X\"}}");
     CHECK(c.users == 3 && strcmp(last_text(&c, buf, sizeof buf), "carol is here.") == 0);
     feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"UNSUBSCRIBE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":\"carol\",\"system\":\"X\"}}");
@@ -296,6 +304,7 @@ static void test_wrap_and_render(void) {
         CHECK(u.inlen == 2);
         ui_render(&u, &c, &s, fake_now, "online");
         CHECK(s.cells[23 * 80 + 0].ch == '>' && s.cells[23 * 80 + 2].ch == 'h' && s.cur_x == 4 && s.cur_y == 23);
+        CHECK(ui_palette[0] == 0 && ui_palette[15] == 0xFFFFFF && ui_palette[16] == 0 && ui_palette[21] == 0x0000FF && ui_palette[196] == 0xFF0000 && ui_palette[231] == 0xFFFFFF && ui_palette[232] == 0x080808 && ui_palette[255] == 0xEEEEEE);
         outlen = 0;
         c.connected = 1;
         ui_key(&u, &c, KEY_ENTER, fake_now, NULL, 0);
@@ -316,6 +325,58 @@ static void test_wrap_and_render(void) {
             ui_key(&u, &c, KEY_ENTER, fake_now, nick, sizeof nick);
             CHECK(strcmp(nick, "a") == 0 && u.mode == UI_CHAT);
         }
+    }
+}
+
+static void test_inflate_and_art(void) {
+    static unsigned char out[8192];
+    long n;
+    n = inflate_zlib(v_stored_z, sizeof v_stored_z, out, sizeof out);
+    CHECK(n == V_STORED_RAWLEN && memcmp(out, v_stored_raw, (size_t)n) == 0);
+    n = inflate_zlib(v_fixed_z, sizeof v_fixed_z, out, sizeof out);
+    CHECK(n == V_FIXED_RAWLEN && memcmp(out, v_fixed_raw, (size_t)n) == 0);
+    n = inflate_zlib(v_dyn_z, sizeof v_dyn_z, out, sizeof out);
+    CHECK(n == V_DYN_RAWLEN && memcmp(out, v_dyn_raw, (size_t)n) == 0);
+    CHECK(inflate_zlib(v_dyn_z, sizeof v_dyn_z, out, 100) == -1);          /* too small */
+    CHECK(inflate_zlib(v_dyn_z, sizeof v_dyn_z / 2, out, sizeof out) == -1); /* truncated */
+    CHECK(inflate_zlib((const unsigned char *)"nope!!", 6, out, sizeof out) == -1);
+    {
+        static art_image img;
+        char from[32];
+        CHECK(art_is_envelope(v_env) && !art_is_envelope("[TVTUNER|off]"));
+        CHECK(art_parse(v_env, strlen(v_env), &img, from, sizeof from) == 1);
+        CHECK(img.w == 12 && img.h == 3 && strcmp(from, "alice") == 0);
+        CHECK(img.ch[0] == 'A' && img.ch[35] == 'J' && img.fg[0] == 1 && img.bg[0] == 16 && img.fg[35] == 36 && img.bg[35] == 51);
+        CHECK(art_parse("[BITMAP|1|1|x|zz]", 17, &img, NULL, 0) == 0);
+        CHECK(art_parse("[BITMAP|1|1|x", 13, &img, NULL, 0) == 0);
+    }
+    {
+        /* Through the chat: a notice, a queued piece, /img opens it. */
+        static chat c;
+        static ui u;
+        static screen s;
+        chat_io io;
+        char line[8192], buf[256];
+        io.ctx = NULL; io.send = cap_send; io.now_ms = cap_now;
+        chat_init(&c, &io);
+        chat_set_identity(&c, "SiX", "PS3", NULL);
+        ui_init(&u);
+        u.mode = UI_CHAT;
+        snprintf(line, sizeof line, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"alice\"},\"str\":\"%s\",\"time\":1761000000000}}", v_env);
+        feed(&c, line);
+        CHECK(c.nart == 1 && chat_unviewed_art(&c) == 1 && c.count == 1);
+        CHECK(strcmp(last_text(&c, buf, sizeof buf), "alice sent art (12x3). /img or Square to view") == 0);
+        chat_input(&c, (const unsigned char *)"/img", 4);
+        CHECK(c.want_art == 0);
+        ui_key(&u, &c, KEY_VIEW_ART, fake_now, NULL, 0);
+        CHECK(u.view_art == 0);
+        s.cols = 80; s.rows = 25;
+        ui_render(&u, &c, &s, fake_now, "online");
+        CHECK(chat_unviewed_art(&c) == 0);
+        /* Centered: 12 wide in 80 -> x offset 34; 3 tall in 23 -> y offset 10, plus the header row. */
+        CHECK(s.cells[11 * 80 + 34].ch == 'A' && s.cells[11 * 80 + 34].fg == ui_palette[1] && s.cells[11 * 80 + 34].bg == ui_palette[16]);
+        ui_key(&u, &c, KEY_ESC, fake_now, NULL, 0);
+        CHECK(u.view_art == -1);
     }
 }
 
@@ -342,6 +403,7 @@ int main(void) {
     test_chat();
     test_ring_wraps();
     test_wrap_and_render();
+    test_inflate_and_art();
     test_config();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

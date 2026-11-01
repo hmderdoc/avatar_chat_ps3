@@ -52,12 +52,6 @@ static char g_base[256] = "/dev_hdd0/game/AVCH00001/USRDIR/";
 static plat_options g_opt;
 static FILE *g_log;
 
-/* CGA palette, XRGB. */
-static const u32 palette[16] = {
-    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
-    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
-};
-
 void plat_set_argv0(const char *argv0) {
     /* "/dev_hdd0/game/AVCH00001/USRDIR/EBOOT.BIN" -> its directory. */
     const char *slash;
@@ -177,9 +171,8 @@ void plat_screen_size(int *cols, int *rows) {
     *rows = g_rows;
 }
 
-static void draw_cell(u32 *buf, int cx, int cy, unsigned char ch, unsigned char attr, int cursor) {
+static void draw_cell(u32 *buf, int cx, int cy, unsigned char ch, u32 fg, u32 bg, int cursor) {
     const unsigned char *glyph = font_cp437 + ch * FONT_H;
-    u32 fg = palette[attr & 15], bg = palette[(attr >> 4) & 7];
     int px0 = g_margin_x + cx * FONT_W * g_scale;
     int py0 = g_margin_y + cy * FONT_H * g_scale;
     int row, col, sy, sx;
@@ -205,7 +198,7 @@ void plat_present(const screen *s) {
     for (y = 0; y < s->rows && y < g_rows; y++)
         for (x = 0; x < s->cols && x < g_cols; x++) {
             const cell *c = &s->cells[y * s->cols + x];
-            draw_cell(buf, x, y, c->ch, c->attr, blink_on && x == s->cur_x && y == s->cur_y);
+            draw_cell(buf, x, y, c->ch, c->fg, c->bg, blink_on && x == s->cur_x && y == s->cur_y);
         }
     flip(g_cur);
     g_cur = (g_cur + 1) % NBUF;
@@ -249,6 +242,7 @@ static int raw_to_key(u16 code) {
     case KB_RAWKEY_END: return KEY_END;
     case KB_RAWKEY_F1: return KEY_F1;
     case KB_RAWKEY_F2: return KEY_F2;
+    case KB_RAWKEY_F3: return KEY_F3;
     default: return KEY_NONE;
     }
 }
@@ -310,6 +304,7 @@ static void poll_pad(void) {
         if (pad.BTN_CIRCLE) now |= 64;
         if (pad.BTN_CROSS) now |= 128;
         if (pad.BTN_TRIANGLE) now |= 256;
+        if (pad.BTN_SQUARE) now |= 512;
     }
     {
         u32 pressed = now & ~prev;
@@ -323,6 +318,7 @@ static void poll_pad(void) {
         if (pressed & 64) push_key(KEY_ESC);
         if (pressed & 128) push_key(KEY_ENTER);
         if (pressed & 256) push_key(KEY_F1);
+        if (pressed & 512) push_key(KEY_VIEW_ART);
     }
 }
 

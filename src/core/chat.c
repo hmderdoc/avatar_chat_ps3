@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 #define OUT_CAP 8192
 #define ARENA_CAP (768 * 1024)
@@ -39,7 +40,29 @@ void chat_init(chat *c, const chat_io *io) {
     memset(c, 0, sizeof *c);
     c->io = *io;
     c->history_count = 40;
+    c->want_art = -1;
     strcpy(c->channel, "main");
+}
+
+chat_art *chat_art_at(chat *c, int i) {
+    if (i < 0 || i >= c->nart) return NULL;
+    return &c->arts[(c->art_head + i) % CHAT_ARTS];
+}
+
+int chat_unviewed_art(const chat *c) {
+    int i, n = 0;
+    for (i = 0; i < c->nart; i++)
+        if (!c->arts[(c->art_head + i) % CHAT_ARTS].viewed) n++;
+    return n;
+}
+
+static chat_art *art_push(chat *c) {
+    chat_art *a;
+    if (c->nart < CHAT_ARTS) a = &c->arts[(c->art_head + c->nart++) % CHAT_ARTS];
+    else { a = &c->arts[c->art_head]; c->art_head = (c->art_head + 1) % CHAT_ARTS; }
+    memset(a, 0, sizeof *a);
+    c->seq++;
+    return a;
 }
 
 static void build_nick_json(chat *c) {
@@ -263,7 +286,7 @@ static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm,
 }
 
 static void help(chat *c) {
-    chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /compact  /quit");
+    chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /img [N]  /compact  /quit");
 }
 
 void chat_input(chat *c, const unsigned char *line, size_t n) {
@@ -284,6 +307,20 @@ void chat_input(chat *c, const unsigned char *line, size_t n) {
     if (ieq(p, "quit") || ieq(p, "exit") || ieq(p, "q")) { c->want_quit = 1; return; }
     if (ieq(p, "help") || ieq(p, "?")) { help(c); return; }
     if (ieq(p, "compact")) { c->toggle_compact = 1; return; }
+    if (ieq(p, "img") || strncmp(p, "img ", 4) == 0) {
+        int n = c->nart;
+        if (n == 0) { chat_notice(c, "No art has been sent here yet."); return; }
+        if (p[3] == ' ') {
+            int k = atoi(p + 4);
+            if (k < 1 || k > n) { chat_notice(c, "/img N picks one of the last %d pieces, 1 = newest.", n); return; }
+            c->want_art = n - k;
+        } else {
+            int i;
+            c->want_art = n - 1;
+            for (i = 0; i < n; i++) if (!chat_art_at(c, i)->viewed) { c->want_art = i; break; }
+        }
+        return;
+    }
     if (ieq(p, "who")) {
         if (!c->connected) { chat_notice(c, "Not connected."); return; }
         send_who(c, c->channel);
@@ -340,6 +377,46 @@ static int is_marker(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
+/* "#rrggbb" or "#rgb" -> 0x00RRGGBB; 0 when absent or malformed (which is
+ * also what "" means: the default colour). */
+static unsigned int parse_hex_color(const char *s) {
+    unsigned int v = 0;
+    int i, n;
+    if (!s || s[0] != '#') return 0;
+    n = (int)strlen(s + 1);
+    if (n != 6 && n != 3) return 0;
+    for (i = 1; s[i]; i++) {
+        int c = s[i], d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return 0;
+        v = (v << 4) | (unsigned)d;
+        if (n == 3) v = (v << 4) | (unsigned)d;
+    }
+    return v == 0 ? 0x010101 : v; /* pure black still counts as a colour */
+}
+
+static void take_style(chat_msg *m, const json_val *style) {
+    const json_val *colors = json_get(style, "colors"), *tag = json_get(style, "tag"), *e;
+    int i = 0;
+    m->ncolors = 0;
+    m->tag[0] = 0;
+    if (!style || style->type != J_OBJECT) return;
+    if (colors && colors->type == J_ARRAY) {
+        for (e = colors->first; e && i < CHAT_NAME - 1; e = e->next, i++)
+            m->colors[i] = e->type == J_STRING ? parse_hex_color(e->str) : 0;
+        m->ncolors = (unsigned char)i;
+    }
+    if (tag && tag->type == J_OBJECT) {
+        const char *text = json_str(json_get(tag, "text"), "");
+        size_t n = cp437_from_utf8(text, strlen(text), (unsigned char *)m->tag, sizeof m->tag - 1);
+        m->tag[n] = 0;
+        m->tag_fg = parse_hex_color(json_str(json_get(tag, "fg"), ""));
+        m->tag_bg = parse_hex_color(json_str(json_get(tag, "bg"), ""));
+    }
+}
+
 /* Appends one wire message to the ring; live=1 for an UPDATE, 0 for history. */
 static void take_message(chat *c, const json_val *msg, int private_box, int live) {
     const json_val *nick = json_get(msg, "nick");
@@ -357,8 +434,21 @@ static void take_message(chat *c, const json_val *msg, int private_box, int live
     if (self && live && recent_self(c, t, str)) return;
 
     if (is_marker(str, "[TVTUNER|")) return;
-    if (is_marker(str, "[BITMAP|")) {
-        if (live) chat_notice(c, "%s sent an image (not shown here).", name);
+    if (art_is_envelope(str)) {
+        static art_image tmp;
+        char from[CHAT_NAME];
+        if (art_parse(str, strlen(str), &tmp, from, sizeof from)) {
+            chat_art *a = art_push(c);
+            a->img = tmp;
+            a->time = t;
+            a->viewed = !live;
+            copy_cp437(a->from, sizeof a->from, *name ? name : from);
+            snprintf(a->room, sizeof a->room, "%s", private_box ? c->nick : c->channel);
+            chat_notice(c, "%s sent art (%dx%d). %s to view", a->from, tmp.w, tmp.h,
+                        live ? "/img or Square" : "/img");
+        } else if (live) {
+            chat_notice(c, "%s sent an image this client can't decode.", name);
+        }
         return;
     }
     m = ring_push(c);
@@ -369,6 +459,7 @@ static void take_message(chat *c, const json_val *msg, int private_box, int live
     copy_cp437(m->host, sizeof m->host, host);
     m->textlen = (int)cp437_from_utf8(str, strlen(str), m->text, sizeof m->text);
     if (*avatar && avatar_from_base64(avatar, strlen(avatar), m->avatar)) m->has_avatar = 1;
+    take_style(m, json_get(nick, "style"));
     if (private_box && !self) snprintf(c->last_pm_from, sizeof c->last_pm_from, "%s", name);
 }
 

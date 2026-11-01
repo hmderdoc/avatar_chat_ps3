@@ -9,10 +9,17 @@
 #define UI_MAX_ROWS 60
 #define UI_INPUT_MAX 1000
 
+/* A cell carries real colours (0x00RRGGBB): the PS3 framebuffer is 24-bit,
+ * so handle colours, 256-colour art and pictures all draw exactly. The CGA
+ * attribute helpers map through ui_palette. */
 typedef struct {
     unsigned char ch;    /* CP437 */
-    unsigned char attr;  /* CGA: fg low nibble, bg high nibble */
+    unsigned int fg, bg; /* 0x00RRGGBB */
 } cell;
+
+/* 0-15 CGA, 16-231 the 6x6x6 cube, 232-255 greys: xterm's 256 colours. */
+extern const unsigned int ui_palette[256];
+unsigned int ui_rgb(unsigned char idx);
 
 typedef struct {
     int cols, rows;
@@ -25,8 +32,9 @@ enum {
     KEY_NONE = 0,
     KEY_ENTER = 0x1000, KEY_BACKSPACE, KEY_DELETE, KEY_ESC, KEY_TAB,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_PGUP, KEY_PGDN, KEY_HOME, KEY_END,
-    KEY_F1, KEY_F2,
+    KEY_F1, KEY_F2, KEY_F3,
     KEY_TOGGLE_COMPACT,  /* pad Select */
+    KEY_VIEW_ART,        /* pad Square, F3: open the art viewer */
     KEY_QUIT             /* pad Start, window close */
 };
 
@@ -43,6 +51,9 @@ typedef struct {
     int quit;
     unsigned drawn_seq;
     int dirty;
+    /* Art viewer: which piece is open (oldest = 0), -1 for none, and how
+     * far it is scrolled when larger than the screen. */
+    int view_art, art_dx, art_dy;
 } ui;
 
 void ui_init(ui *u);
