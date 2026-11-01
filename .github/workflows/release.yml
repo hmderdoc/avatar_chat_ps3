@@ -1,0 +1,42 @@
+# Push a tag like v0.1.0 and the PS3 package is built and attached to a
+# GitHub Release, so nobody needs the toolchain to install it. Also runs
+# on demand from the Actions tab (workflow_dispatch) as a dry run that
+# only uploads artifacts.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with the ps3dev toolchain
+        run: .github/scripts/build-ps3.sh
+      - name: Bundle
+        run: |
+          v="${GITHUB_REF_NAME}"
+          mkdir -p dist/avatar_chat_ps3
+          cp avatar_chat_ps3.pkg avatar_chat_ps3.self avatar_chat_ps3.ini README.md LICENSE LICENSE-moebius.txt dist/avatar_chat_ps3/
+          (cd dist && zip -r "avatar_chat_ps3_${v}.zip" avatar_chat_ps3)
+          cp avatar_chat_ps3.pkg "dist/avatar_chat_ps3_${v}.pkg"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: avatar_chat_ps3-release
+          path: dist/*
+          if-no-files-found: error
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/avatar_chat_ps3_*.pkg
+            dist/avatar_chat_ps3_*.zip
+          generate_release_notes: true

@@ -51,8 +51,21 @@ TV lounge, multiple rooms at once.
 
 ## Install on the PS3
 
-1. Build or download `avatar_chat_ps3.pkg` (see below), install it from the
-   XMB's package installer. It appears as **Avatar Chat**.
+Nobody needs the toolchain to use it: GitHub Actions builds the package.
+
+- **Releases:** every tagged version has `avatar_chat_ps3_vX.Y.Z.pkg` on the
+  [Releases](../../releases) page.
+- **Latest commit:** the `ci` workflow on the
+  [Actions](../../actions) tab keeps `avatar_chat_ps3.self` and `.pkg`
+  as a downloadable artifact for each push (GitHub login needed, kept 90
+  days).
+
+Then, on a PS3 running CFW or HEN (homebrew can't be installed on stock
+firmware):
+
+1. Copy the `.pkg` to the root of a FAT32 USB stick, plug it into the
+   PS3, and install it from the XMB: **Game > Install Package Files** (HEN:
+   the Package Manager). It appears as **Avatar Chat** under Game.
 2. Edit `/dev_hdd0/game/AVCH00001/USRDIR/avatar_chat_ps3.ini` over FTP:
    at least `nick`, and `host`/`port` if you run your own server. The
    file in this repo documents every key. Without a `nick` the app asks
@@ -64,7 +77,7 @@ TV lounge, multiple rooms at once.
 4. Plug in a USB keyboard and launch.
 
 For development, `make` produces `avatar_chat_ps3.self` which `ps3load`
-sends straight to a console running the PSL1GHT loader.
+sends straight to a console running the PSL1GHT loader, with no install.
 
 ## Build
 
@@ -72,11 +85,11 @@ sends straight to a console running the PSL1GHT loader.
 
 Needs the [ps3dev toolchain](https://github.com/ps3dev/ps3toolchain) with
 PSL1GHT, and `PS3DEV`, `PSL1GHT` and `PATH` set as its instructions say.
-The `ps3dev/ps3dev` Docker image has it all:
+The ps3dev Docker image has it all; this script pulls it and builds, and
+is what CI runs:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src ps3dev/ps3dev:latest \
-  sh -c 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev PATH=$PATH:/usr/local/ps3dev/bin:/usr/local/ps3dev/ppu/bin && make pkg'
+.github/scripts/build-ps3.sh
 ```
 
 ```sh

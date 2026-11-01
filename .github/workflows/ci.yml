@@ -1,11 +1,13 @@
-# Host build and core tests on every push; the PS3 target is built in the
-# ps3dev toolchain container so a broken PS3 build shows up here too.
+# Every push: build and test the host client, then build the real PS3
+# target in the ps3dev toolchain container and keep the .self and .pkg as
+# workflow artifacts. Tagged releases are built by release.yml.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   host:
@@ -21,19 +23,15 @@ jobs:
 
   ps3:
     runs-on: ubuntu-latest
-    container: ps3dev/ps3dev:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build EBOOT and pkg
-        run: |
-          export PS3DEV=/usr/local/ps3dev
-          export PSL1GHT=$PS3DEV
-          export PATH=$PATH:$PS3DEV/bin:$PS3DEV/ppu/bin:$PS3DEV/spu/bin
-          make pkg
+      - name: Build with the ps3dev toolchain
+        run: .github/scripts/build-ps3.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: avatar_chat_ps3
+          name: avatar_chat_ps3-${{ github.sha }}
           path: |
             avatar_chat_ps3.self
             avatar_chat_ps3.pkg
+            avatar_chat_ps3.ini
           if-no-files-found: error
