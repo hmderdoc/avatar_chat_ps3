@@ -514,7 +514,7 @@ static void test_gif(void) {
     CHECK(gif_size(gif_small, sizeof gif_small, &w, &h) && w == 4 && h == 2);
     CHECK(gif_decode(gif_small, sizeof gif_small, rgb, 4, 2, scratch, sizeof scratch, err, sizeof err));
     CHECK(rgb[0] == 255 && rgb[4] == 255 && rgb[8] == 255 && rgb[9] == 0 && rgb[10] == 0 && rgb[11] == 0);
-    CHECK(rgb[12] == 0 && rgb[13] == 0 && rgb[14] == 0 && rgb[17] == 255 && rgb[21] == 0 && rgb[22] == 255);
+    CHECK(rgb[12] == 0 && rgb[13] == 0 && rgb[14] == 0 && rgb[17] == 255 && rgb[19] == 255 && rgb[21] == 255 && rgb[22] == 0);
     CHECK(gif_size(gif_il, sizeof gif_il, &w, &h) && gif_decode(gif_il, sizeof gif_il, rgb, 8, 8, scratch, sizeof scratch, err, sizeof err));
     for (y = 0; y < 8; y++) for (x = 0; x < 8; x++) if (rgb[(y * 8 + x) * 3] != (y % 2 ? 200 : 10)) ok = 0;
     CHECK(ok);
