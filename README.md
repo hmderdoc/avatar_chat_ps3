@@ -13,12 +13,13 @@ on the Cell: the official Go toolchain needs a POWER8 and the PS3's PPE is
 not one, so this is a from-scratch client that speaks the same protocol
 ([PROTOCOL.md](https://github.com/hmderdoc/avatar_chat_universal/blob/main/PROTOCOL.md)).
 
-**Status: alpha, not yet run on a real PS3.** The portable core (protocol,
-layout, avatars) is unit-tested and has been run end to end against
-`avatar_chat_server` through the host build. The PSL1GHT platform layer
-(`src/platform/ps3`) builds cleanly with the real toolchain in CI, which
-produces the `.pkg`, but nobody has booted it on hardware yet. Reports
-from a console are the next step; see [Testing on a PS3](#testing-on-a-ps3).
+**Status: alpha.** The portable core (protocol, layout, avatars) is
+unit-tested and has been run end to end against `avatar_chat_server`
+through the host build. The PSL1GHT platform layer (`src/platform/ps3`)
+builds in CI, boots in RPCS3 with working video and keyboard, and is
+being debugged from tester reports; see
+[Testing on a PS3 or in RPCS3](#testing-on-a-ps3-or-in-rpcs3). Nobody
+has run it on a real console yet.
 
 ## What it does
 
@@ -111,24 +112,36 @@ make -f Makefile.host check-ps3  # syntax-check the PS3 layer against tests/ps3s
 
 On the host, Ctrl-L toggles compact view and Ctrl-C quits.
 
-## Testing on a PS3
+## Testing on a PS3 or in RPCS3
 
-The PSL1GHT layer compiles, but is untested on hardware. Things most
-likely to need a fix on first boot, in order:
+It runs in [RPCS3](https://rpcs3.net/) too (File > Install Package, or
+boot the `.self`), which is the quickest way to try a build. The first
+tester's run brought up video and keyboard fine and crashed on the first
+`select()` after connecting: PSL1GHT's `net/select.h` makes `fd_set`
+64 bytes while the kernel writes back a 128-byte `sys_net_fd_set`, so the
+stack got overwritten. The client uses `poll()` now. Lessons for the next
+one:
 
-1. **Video:** `init_video` in `src/platform/ps3/platform_ps3.c` follows the
-   PSL1GHT `rsxutil` sample (XRGB buffers, `gcmSetFlip` / `gcmSetWaitFlip`).
-   If the screen stays black, start there.
-2. **Keyboard:** `poll_keyboard` uses `KB_CODETYPE_ASCII` and
-   `KB_RMODE_INPUTCHAR`; keys with no ASCII arrive with `KB_RAWDAT` set
-   and are mapped in `raw_to_key`. If Enter or Backspace do nothing,
-   print `data.keycode[k]` to `/dev_hdd0/tmp/avatar_chat_ps3.log`.
-3. **Network:** `netInitialize` then BSD sockets; `gethostbyname` falls
-   back from `inet_aton`. If names don't resolve, put the IP in `host`.
-4. **Config path:** derived from `argv[0]`; falls back to
-   `/dev_hdd0/game/AVCH00001/USRDIR/`.
-
-`plat_log` writes to `/dev_hdd0/tmp/avatar_chat_ps3.log`.
+- **Crash addresses can be symbolized.** RPCS3 logs a fault as
+  `PPU[...] Thread (main_thread) [0x00011490]: VM: Access violation ...`;
+  the number in brackets is the program counter. Actions tab >
+  **symbolize** > Run workflow with that address prints the function and
+  the disassembly around it. Release zips also carry `debug/` with the
+  ELF, the link map and `tools/symbolize.py` for doing it locally. With
+  RPCS3's recompiler the address can be the most recent call site rather
+  than the faulting instruction, so read it as "somewhere after here".
+- **The log.** The app writes `/dev_hdd0/tmp/avatar_chat_ps3.log` (in
+  RPCS3: `dev_hdd0/tmp/` under the emulator's folder): video setup, the
+  connect, each receive and any socket error. The last line before a
+  crash says what it was doing.
+- **Still unverified on hardware:** `init_video` follows the PSL1GHT
+  `rsxutil` sample; `poll_keyboard` uses `KB_CODETYPE_ASCII` and maps
+  the raw codes in `raw_to_key`; `gethostbyname` falls back from
+  `inet_aton` (put an IP in `host` if names don't resolve); the config
+  path comes from `argv[0]` with `/dev_hdd0/game/AVCH00001/USRDIR/` as
+  the fallback.
+- **Checking an SDK header** without the toolchain: Actions tab >
+  **sdk-probe** runs a shell command inside the ps3dev image.
 
 ## Layout
 
