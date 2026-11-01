@@ -34,4 +34,6 @@ jobs:
             avatar_chat_ps3.self
             avatar_chat_ps3.pkg
             avatar_chat_ps3.ini
+            avatar_chat_ps3.elf
+            avatar_chat_ps3.elf.map
           if-no-files-found: error
