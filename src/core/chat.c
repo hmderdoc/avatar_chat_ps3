@@ -42,7 +42,18 @@ void chat_init(chat *c, const chat_io *io) {
     c->history_count = 40;
     c->want_art = -1;
     strcpy(c->channel, "main");
+    strcpy(c->joined[0], "main");
+    c->njoined = 1;
 }
+
+static int room_index(const chat *c, const char *name) {
+    int i;
+    for (i = 0; i < c->njoined; i++)
+        if (ieq(c->joined[i], name)) return i;
+    return -1;
+}
+
+int chat_current_room(const chat *c) { return room_index(c, c->channel); }
 
 chat_art *chat_art_at(chat *c, int i) {
     if (i < 0 || i >= c->nart) return NULL;
@@ -83,6 +94,12 @@ void chat_set_identity(chat *c, const char *nick, const char *host, const unsign
 
 void chat_set_channel(chat *c, const char *channel) {
     snprintf(c->channel, sizeof c->channel, "%s", channel && *channel ? channel : "main");
+    if (room_index(c, c->channel) < 0) {
+        if (c->njoined >= CHAT_ROOMS) c->njoined = CHAT_ROOMS - 1;
+        snprintf(c->joined[c->njoined], CHAT_CHANNEL, "%s", c->channel);
+        c->unread[c->njoined] = c->mentioned[c->njoined] = 0;
+        c->njoined++;
+    }
 }
 
 /* ---- ring ------------------------------------------------------------ */
@@ -218,7 +235,10 @@ void chat_connected(chat *c) {
     c->last_rx_ms = now_ms(c);
     c->last_ping_ms = c->last_rx_ms;
     chat_notice(c, "Connected. Joining #%s ...", c->channel);
-    send_subscribe(c, c->channel);
+    {
+        int i;
+        for (i = 0; i < c->njoined; i++) send_subscribe(c, c->joined[i]);
+    }
     if (c->nick[0]) send_subscribe(c, c->nick);
     if (c->history_count > 0) send_slice(c, c->channel, c->history_count);
     send_who(c, c->channel);
@@ -231,20 +251,24 @@ void chat_disconnected(chat *c, const char *why) {
     c->roster[0] = 0;
 }
 
-void chat_join(chat *c, const char *channel) {
-    char name[CHAT_CHANNEL];
+static int clean_room_name(chat *c, const char *channel, char *name, size_t cap) {
     size_t i, n = 0;
-    for (i = 0; channel[i] && n + 1 < sizeof name; i++) {
+    for (i = 0; channel[i] && n + 1 < cap; i++) {
         char ch = channel[i];
         if (ch == '#' && n == 0) continue;
         if (isalnum((unsigned char)ch) || ch == '_' || ch == '-') name[n++] = ch;
-        else { chat_notice(c, "Room names are letters, digits, - and _."); return; }
+        else { chat_notice(c, "Room names are letters, digits, - and _."); return -1; }
     }
     name[n] = 0;
-    if (n == 0) { chat_notice(c, "Usage: /join <room>"); return; }
-    if (ieq(name, c->channel)) { chat_notice(c, "You are already in #%s.", c->channel); return; }
-    if (c->connected) send_unsubscribe(c, c->channel);
-    chat_set_channel(c, name);
+    return n > 0;
+}
+
+/* Make name the viewed room: clear the transcript and load it. */
+static void view_room(chat *c, const char *name) {
+    int idx;
+    snprintf(c->channel, sizeof c->channel, "%s", name);
+    idx = room_index(c, name);
+    if (idx >= 0) { c->unread[idx] = 0; c->mentioned[idx] = 0; }
     c->count = 0;
     c->head = 0;
     c->users = 0;
@@ -252,12 +276,64 @@ void chat_join(chat *c, const char *channel) {
     c->seq++;
     if (c->connected) {
         chat_notice(c, "Joining #%s ...", c->channel);
-        send_subscribe(c, c->channel);
         if (c->history_count > 0) send_slice(c, c->channel, c->history_count);
         send_who(c, c->channel);
     } else {
         chat_notice(c, "Will join #%s when connected.", c->channel);
     }
+}
+
+void chat_join(chat *c, const char *channel) {
+    char name[CHAT_CHANNEL];
+    int idx;
+    {
+        int rc = clean_room_name(c, channel, name, sizeof name);
+        if (rc < 0) return;
+        if (rc == 0) { chat_notice(c, "Usage: /join <room>"); return; }
+    }
+    if (ieq(name, c->channel)) { chat_notice(c, "You are already in #%s.", c->channel); return; }
+    idx = room_index(c, name);
+    if (idx < 0) {
+        if (c->njoined >= CHAT_ROOMS) {
+            chat_notice(c, "You are in %d rooms already; /leave one first.", CHAT_ROOMS);
+            return;
+        }
+        snprintf(c->joined[c->njoined], CHAT_CHANNEL, "%s", name);
+        c->unread[c->njoined] = c->mentioned[c->njoined] = 0;
+        c->njoined++;
+        if (c->connected) send_subscribe(c, name);
+    } else {
+        snprintf(name, sizeof name, "%s", c->joined[idx]); /* the joined spelling */
+    }
+    view_room(c, name);
+}
+
+void chat_leave(chat *c, const char *channel) {
+    char name[CHAT_CHANNEL];
+    int idx, i;
+    if (!channel || !*channel) channel = c->channel;
+    if (clean_room_name(c, channel, name, sizeof name) <= 0) return;
+    idx = room_index(c, name);
+    if (idx < 0) { chat_notice(c, "You are not in #%s.", name); return; }
+    if (c->njoined == 1) { chat_notice(c, "That is your only room; /join another first."); return; }
+    if (c->connected) send_unsubscribe(c, c->joined[idx]);
+    for (i = idx; i + 1 < c->njoined; i++) {
+        strcpy(c->joined[i], c->joined[i + 1]);
+        c->unread[i] = c->unread[i + 1];
+        c->mentioned[i] = c->mentioned[i + 1];
+    }
+    c->njoined--;
+    c->seq++;
+    if (ieq(name, c->channel)) view_room(c, c->joined[idx < c->njoined ? idx : c->njoined - 1]);
+    else chat_notice(c, "Left #%s.", name);
+}
+
+void chat_switch(chat *c, int dir) {
+    int idx = room_index(c, c->channel);
+    if (c->njoined < 2) return;
+    if (idx < 0) idx = 0;
+    idx = (idx + (dir < 0 ? -1 : 1) + c->njoined) % c->njoined;
+    view_room(c, c->joined[idx]);
 }
 
 static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm, const char *shown_as) {
@@ -286,7 +362,7 @@ static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm,
 }
 
 static void help(chat *c) {
-    chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /img [N]  /compact  /quit");
+    chat_notice(c, "Commands: /join <room>  /leave [room]  /next  /prev  /rooms  /who  /msg <name> <text>  /r <text>  /img [N]  /compact  /quit");
 }
 
 void chat_input(chat *c, const unsigned char *line, size_t n) {
@@ -327,10 +403,35 @@ void chat_input(chat *c, const unsigned char *line, size_t n) {
         return;
     }
     if (ieq(p, "rooms")) {
+        char list[CHAT_TEXT];
+        size_t n = 0;
+        int i;
+        list[0] = 0;
+        for (i = 0; i < c->njoined; i++) {
+            int k = snprintf(list + n, sizeof list - n, "%s#%s%s", n ? ", " : "", c->joined[i],
+                             ieq(c->joined[i], c->channel) ? " (here)" : "");
+            if (k < 0 || n + (size_t)k >= sizeof list) break;
+            n += (size_t)k;
+            if (c->unread[i] > 0) {
+                k = snprintf(list + n, sizeof list - n, " [%d new]", c->unread[i]);
+                if (k < 0 || n + (size_t)k >= sizeof list) break;
+                n += (size_t)k;
+            }
+        }
+        chat_notice(c, "Joined: %s", list);
         if (!c->connected) { chat_notice(c, "Not connected."); return; }
         emit(c, proto_keys(out_buf, OUT_CAP, "public_channels"));
         return;
     }
+    if (ieq(p, "leave") || ieq(p, "part")) { chat_leave(c, NULL); return; }
+    if (strncmp(p, "leave ", 6) == 0 || strncmp(p, "part ", 5) == 0) {
+        p = strchr(p, ' ') + 1;
+        while (*p == ' ') p++;
+        chat_leave(c, p);
+        return;
+    }
+    if (ieq(p, "next")) { chat_switch(c, 1); return; }
+    if (ieq(p, "prev")) { chat_switch(c, -1); return; }
     if (strncmp(p, "join ", 5) == 0 || strncmp(p, "j ", 2) == 0) {
         p = strchr(p, ' ') + 1;
         while (*p == ' ') p++;
@@ -375,6 +476,26 @@ void chat_tick(chat *c) {
 
 static int is_marker(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static int word_byte(int c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); }
+
+/* The web chat's rule: our name as a whole word, optional leading @,
+ * ignoring case. */
+static int mentions_me(const chat *c, const char *text) {
+    size_t n = strlen(c->nick), i, tl;
+    char low[CHAT_NAME];
+    if (n == 0) return 0;
+    for (i = 0; i < n; i++) low[i] = (char)tolower((unsigned char)c->nick[i]);
+    low[n] = 0;
+    tl = strlen(text);
+    for (i = 0; i + n <= tl; i++) {
+        size_t k;
+        for (k = 0; k < n; k++) if (tolower((unsigned char)text[i + k]) != low[k]) break;
+        if (k < n) continue;
+        if ((i == 0 || !word_byte(tolower((unsigned char)text[i - 1]))) && (i + n == tl || !word_byte(tolower((unsigned char)text[i + n])))) return 1;
+    }
+    return 0;
 }
 
 /* "#rrggbb" or "#rgb" -> 0x00RRGGBB; 0 when absent or malformed (which is
@@ -486,7 +607,21 @@ static void handle_update(chat *c, const proto_packet *pk) {
     if (!split_location(pk->location, name, sizeof name, &leaf)) return;
     if (strcmp(leaf, "messages") != 0) return;
     private_box = ieq(name, c->nick);
-    if (!private_box && !ieq(name, c->channel)) return;
+    if (!private_box && !ieq(name, c->channel)) {
+        /* A joined room we are not looking at: count it. */
+        int idx = room_index(c, name);
+        if (idx >= 0 && ieq(pk->oper, "WRITE") && pk->data && pk->data->type == J_OBJECT) {
+            const char *str = json_str(json_get(pk->data, "str"), "");
+            const json_val *nick = json_get(pk->data, "nick");
+            if (!same_user(c, json_str(json_get(nick, "name"), ""), json_str(json_get(nick, "host"), ""),
+                           json_str(json_get(nick, "mailbox"), "")) && !is_marker(str, "[TVTUNER|")) {
+                c->unread[idx]++;
+                if (mentions_me(c, str)) c->mentioned[idx] = 1;
+                c->seq++;
+            }
+        }
+        return;
+    }
 
     if (ieq(pk->oper, "WRITE")) {
         if (pk->data && pk->data->type == J_OBJECT) take_message(c, pk->data, private_box, 1);

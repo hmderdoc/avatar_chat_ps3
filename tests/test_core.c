@@ -226,15 +226,35 @@ static void test_chat(void) {
     chat_input(&c, (const unsigned char *)"/msg eve hello", strlen("/msg eve hello"));
     CHECK(strstr(outbox, "\"location\":\"channels.eve.messages\""));
 
-    /* /join: unsubscribe, subscribe, slice, who; ring cleared. */
+    /* /join: subscribe, slice, who; main stays joined; ring cleared. */
     outlen = 0;
     chat_input(&c, (const unsigned char *)"/join #Lobby", strlen("/join #Lobby"));
-    CHECK(strstr(outbox, "\"oper\":\"UNSUBSCRIBE\",\"location\":\"channels.main.messages\""));
+    CHECK(!strstr(outbox, "UNSUBSCRIBE"));
     CHECK(strstr(outbox, "\"oper\":\"SUBSCRIBE\",\"location\":\"channels.Lobby.messages\""));
     CHECK(strstr(outbox, "\"location\":\"channels.Lobby.history\""));
-    CHECK(strcmp(c.channel, "Lobby") == 0 && c.count == 1);
+    CHECK(strcmp(c.channel, "Lobby") == 0 && c.count == 1 && c.njoined == 2 && chat_current_room(&c) == 1);
     chat_input(&c, (const unsigned char *)"/join bad room!", strlen("/join bad room!"));
     CHECK(strcmp(c.channel, "Lobby") == 0);
+    /* Traffic on main is counted, with a mention flag; viewing it clears it. */
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"alice\"},\"str\":\"anyone?\",\"time\":1761000004000}}");
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"alice\"},\"str\":\"hey @six!\",\"time\":1761000004001}}");
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"SiX\",\"host\":\"PS3\"},\"str\":\"my own\",\"time\":1761000004002}}");
+    CHECK(c.unread[0] == 2 && c.mentioned[0] == 1 && c.count == 2); /* the bad-name notice is the 2nd */
+    outlen = 0;
+    chat_switch(&c, 1);
+    CHECK(strcmp(c.channel, "main") == 0 && c.unread[0] == 0 && c.mentioned[0] == 0 && strstr(outbox, "channels.main.history") && !strstr(outbox, "SUBSCRIBE"));
+    chat_switch(&c, -1);
+    CHECK(strcmp(c.channel, "Lobby") == 0);
+    /* Reconnect subscribes to every joined room. */
+    outlen = 0;
+    chat_connected(&c);
+    CHECK(strstr(outbox, "channels.main.messages\",\"nick\"") && strstr(outbox, "channels.Lobby.messages\",\"nick\""));
+    /* /leave the viewed room falls back to the other one; can't leave the last. */
+    outlen = 0;
+    chat_input(&c, (const unsigned char *)"/leave", 6);
+    CHECK(strstr(outbox, "\"oper\":\"UNSUBSCRIBE\",\"location\":\"channels.Lobby.messages\"") && strcmp(c.channel, "main") == 0 && c.njoined == 1);
+    chat_input(&c, (const unsigned char *)"/leave", 6);
+    CHECK(c.njoined == 1 && strcmp(c.channel, "main") == 0);
 
     /* ERROR shows as a notice; /quit sets the flag; keepalive ping. */
     feed(&c, "{\"func\":\"ERROR\",\"data\":{\"description\":\"slow down\"}}");

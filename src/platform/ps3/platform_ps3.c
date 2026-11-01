@@ -305,6 +305,8 @@ static void poll_pad(void) {
         if (pad.BTN_CROSS) now |= 128;
         if (pad.BTN_TRIANGLE) now |= 256;
         if (pad.BTN_SQUARE) now |= 512;
+        if (pad.BTN_LEFT) now |= 1024;
+        if (pad.BTN_RIGHT) now |= 2048;
     }
     {
         u32 pressed = now & ~prev;
@@ -319,6 +321,8 @@ static void poll_pad(void) {
         if (pressed & 128) push_key(KEY_ENTER);
         if (pressed & 256) push_key(KEY_F1);
         if (pressed & 512) push_key(KEY_VIEW_ART);
+        if (pressed & 1024) push_key(KEY_ROOM_PREV);
+        if (pressed & 2048) push_key(KEY_ROOM_NEXT);
     }
 }
 

@@ -378,11 +378,21 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
     if (u->view_art >= 0) { render_viewer(u, (chat *)c, s, now_ms); return; }
     for (y = 0; y < rows; y++) fill_row(s, y, ' ', C_TEXT);
 
-    /* Header */
+    /* Header: the joined rooms, the viewed one bright, unread counts. */
     fill_row(s, 0, ' ', C_HEADER);
-    x = draw_text(s, 1, 0, "Avatar Chat", C_HEADER, -1);
-    x = draw_text(s, x, 0, "  #", C_HEADER_DIM, -1);
-    x = draw_text(s, x, 0, c->channel, C_HEADER, -1);
+    x = draw_text(s, 1, 0, "Avatar Chat ", C_HEADER, -1);
+    {
+        int i;
+        for (i = 0; i < c->njoined; i++) {
+            int here = strcmp(c->joined[i], c->channel) == 0;
+            x = draw_text(s, x, 0, " #", here ? C_HEADER : C_HEADER_DIM, -1);
+            x = draw_text(s, x, 0, c->joined[i], here ? C_HEADER : C_HEADER_DIM, -1);
+            if (!here && c->unread[i] > 0) {
+                snprintf(tmp, sizeof tmp, "(%d)", c->unread[i]);
+                x = draw_text(s, x, 0, tmp, c->mentioned[i] ? 0x1E : 0x1A, -1);
+            }
+        }
+    }
     snprintf(tmp, sizeof tmp, "  %d user%s", c->users, c->users == 1 ? "" : "s");
     x = draw_text(s, x, 0, tmp, C_HEADER_DIM, -1);
     snprintf(tmp, sizeof tmp, "%s  %s ", c->nick[0] ? c->nick : "", conn ? conn : "");
@@ -508,6 +518,8 @@ int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nic
     case KEY_F1:
         if (u->mode == UI_CHAT) chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /img [N]  /compact  /quit");
         return 1;
+    case KEY_ROOM_NEXT: chat_switch(c, 1); u->scroll = 0; return 1;
+    case KEY_ROOM_PREV: chat_switch(c, -1); u->scroll = 0; return 1;
     case KEY_PGUP: u->scroll += 5; return 1;
     case KEY_PGDN: u->scroll -= 5; if (u->scroll < 0) u->scroll = 0; return 1;
     case KEY_UP: u->scroll += 1; return 1;

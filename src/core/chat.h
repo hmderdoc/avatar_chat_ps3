@@ -17,6 +17,7 @@
 #define CHAT_PEERS    64
 #define CHAT_ROSTER   512
 #define CHAT_ARTS     8    /* art pieces kept for the viewer */
+#define CHAT_ROOMS    8    /* rooms joined at once */
 
 typedef enum { MSG_CHAT, MSG_NOTICE, MSG_PRIVATE } msg_kind;
 
@@ -70,6 +71,13 @@ typedef struct chat {
     char avatar_b64[AVATAR_BYTES * 2];
     char nick_json[512];
     int history_count;
+
+    /* Rooms we stay subscribed to besides the viewed one (channel). Their
+     * traffic is counted, not shown, until they are viewed. */
+    char joined[CHAT_ROOMS][CHAT_CHANNEL];
+    int unread[CHAT_ROOMS];
+    int mentioned[CHAT_ROOMS];  /* an unread line named us */
+    int njoined;
 
     int connected;
     unsigned seq;              /* bumps whenever something visible changed */
@@ -127,7 +135,13 @@ void chat_notice(chat *c, const char *fmt, ...);
 /* Messages oldest (0) to newest (count-1). */
 const chat_msg *chat_msg_at(const chat *c, int i);
 
-/* Switch rooms: leave the current one, join another, reload history. */
+/* View a room: joins it if needed (subscribe) and loads its history. The
+ * room viewed before stays joined; chat_leave drops one. */
 void chat_join(chat *c, const char *channel);
+void chat_leave(chat *c, const char *channel);
+/* View the next (+1) or previous (-1) joined room. */
+void chat_switch(chat *c, int dir);
+/* Index of the viewed room in joined[], or -1. */
+int chat_current_room(const chat *c);
 
 #endif

@@ -212,6 +212,8 @@ int plat_poll_key(void) {
         if (c == '\t') { consume(1); return KEY_TAB; }
         if (c == 0x03) { consume(1); return KEY_QUIT; }
         if (c == 0x0c) { consume(1); return KEY_TOGGLE_COMPACT; } /* Ctrl-L */
+        if (c == 0x0e) { consume(1); return KEY_ROOM_NEXT; }      /* Ctrl-N */
+        if (c == 0x10) { consume(1); return KEY_ROOM_PREV; }      /* Ctrl-P */
         if (c < 0x20) { consume(1); return KEY_NONE; }
         return take_utf8();
     }

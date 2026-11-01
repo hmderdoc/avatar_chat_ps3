@@ -35,6 +35,7 @@ enum {
     KEY_F1, KEY_F2, KEY_F3,
     KEY_TOGGLE_COMPACT,  /* pad Select */
     KEY_VIEW_ART,        /* pad Square, F3: open the art viewer */
+    KEY_ROOM_NEXT, KEY_ROOM_PREV,  /* pad Right/Left, Ctrl-N/Ctrl-P: other joined rooms */
     KEY_QUIT             /* pad Start, window close */
 };
 
