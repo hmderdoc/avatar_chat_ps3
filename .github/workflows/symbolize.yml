@@ -1,0 +1,38 @@
+# Turn crash addresses from a PS3 or RPCS3 log into function names and
+# disassembly, without downloading anything: Actions tab > symbolize >
+# Run workflow, paste the addresses (the [0x...] after "Thread (main_thread)"
+# in an RPCS3 log), then read the job log. Builds the current commit, so
+# run it on the commit the tester has.
+name: symbolize
+
+on:
+  workflow_dispatch:
+    inputs:
+      addresses:
+        description: 'Crash addresses, space separated, e.g. 0x11490'
+        required: true
+        type: string
+
+jobs:
+  symbolize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: .github/scripts/build-ps3.sh
+      - name: Symbols
+        run: python3 tools/symbolize.py avatar_chat_ps3.elf ${{ inputs.addresses }}
+      - name: Disassembly around each address
+        run: |
+          img=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep ps3dev | head -1)
+          for a in ${{ inputs.addresses }}; do
+            lo=$(printf '0x%x' $((a - 0x60))); hi=$(printf '0x%x' $((a + 0x40)))
+            echo "===== $a ($lo..$hi) ====="
+            docker run --rm -v "$PWD:/src" -w /src "$img" bash -ec \
+              "export PATH=\$PATH:/usr/local/ps3dev/ppu/bin; ppu-objdump -d -l --start-address=$lo --stop-address=$hi avatar_chat_ps3.elf | tail -n +7"
+          done
+      - name: Full symbol list
+        run: |
+          img=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep ps3dev | head -1)
+          docker run --rm -v "$PWD:/src" -w /src "$img" bash -ec \
+            'export PATH=$PATH:/usr/local/ps3dev/ppu/bin; ppu-nm -n --defined-only avatar_chat_ps3.elf | grep -i " t "'
