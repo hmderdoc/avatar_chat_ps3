@@ -1,0 +1,479 @@
+#include "chat.h"
+#include "cp437.h"
+#include "base64.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+
+#define OUT_CAP 8192
+#define ARENA_CAP (768 * 1024)
+
+static char out_buf[OUT_CAP];
+static char arena_mem[ARENA_CAP];
+
+static long long now_ms(chat *c) { return c->io.now_ms ? c->io.now_ms(c->io.ctx) : 0; }
+
+static void emit(chat *c, size_t n) {
+    if (n > 0 && c->io.send) c->io.send(c->io.ctx, out_buf, n);
+}
+
+static int ieq(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static void copy_cp437(char *dst, size_t cap, const char *utf8) {
+    size_t n = cp437_from_utf8(utf8 ? utf8 : "", utf8 ? strlen(utf8) : 0, (unsigned char *)dst, cap - 1);
+    dst[n] = 0;
+}
+
+static void loc_messages(char *out, size_t cap, const char *name) { snprintf(out, cap, "channels.%s.messages", name); }
+static void loc_history(char *out, size_t cap, const char *name) { snprintf(out, cap, "channels.%s.history", name); }
+
+void chat_init(chat *c, const chat_io *io) {
+    memset(c, 0, sizeof *c);
+    c->io = *io;
+    c->history_count = 40;
+    strcpy(c->channel, "main");
+}
+
+static void build_nick_json(chat *c) {
+    proto_nick_json(c->nick_json, sizeof c->nick_json, c->nick, c->host, c->has_avatar ? c->avatar_b64 : NULL);
+}
+
+void chat_set_identity(chat *c, const char *nick, const char *host, const unsigned char *avatar120) {
+    snprintf(c->nick, sizeof c->nick, "%s", nick ? nick : "");
+    snprintf(c->host, sizeof c->host, "%s", host ? host : "");
+    c->has_avatar = 0;
+    if (avatar120 && avatar_valid(avatar120)) {
+        memcpy(c->avatar, avatar120, AVATAR_BYTES);
+        base64_encode(c->avatar, AVATAR_BYTES, c->avatar_b64, sizeof c->avatar_b64);
+        c->has_avatar = 1;
+    }
+    build_nick_json(c);
+}
+
+void chat_set_channel(chat *c, const char *channel) {
+    snprintf(c->channel, sizeof c->channel, "%s", channel && *channel ? channel : "main");
+}
+
+/* ---- ring ------------------------------------------------------------ */
+
+static chat_msg *ring_push(chat *c) {
+    chat_msg *m;
+    int idx;
+    if (c->count < CHAT_RING) {
+        idx = (c->head + c->count) % CHAT_RING;
+        c->count++;
+    } else {
+        idx = c->head;
+        c->head = (c->head + 1) % CHAT_RING;
+    }
+    m = &c->ring[idx];
+    memset(m, 0, sizeof *m);
+    c->seq++;
+    return m;
+}
+
+const chat_msg *chat_msg_at(const chat *c, int i) {
+    if (i < 0 || i >= c->count) return NULL;
+    return &c->ring[(c->head + i) % CHAT_RING];
+}
+
+void chat_notice(chat *c, const char *fmt, ...) {
+    char tmp[CHAT_TEXT];
+    va_list ap;
+    chat_msg *m;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    m = ring_push(c);
+    m->kind = MSG_NOTICE;
+    m->time = now_ms(c);
+    m->textlen = (int)cp437_from_utf8(tmp, strlen(tmp), m->text, sizeof m->text);
+}
+
+/* ---- identity helpers ------------------------------------------------ */
+
+static unsigned hash_text(const char *s) {
+    unsigned h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+static void remember_sent(chat *c, long long t, const char *text) {
+    c->sent[c->sent_i].time = t;
+    c->sent[c->sent_i].hash = hash_text(text);
+    c->sent_i = (c->sent_i + 1) % 8;
+}
+
+/* Our own message echoed back by a server that fans out to the sender. */
+static int recent_self(chat *c, long long t, const char *text) {
+    unsigned h = hash_text(text);
+    int i;
+    for (i = 0; i < 8; i++)
+        if (c->sent[i].hash == h && c->sent[i].time == t) return 1;
+    return 0;
+}
+
+static int same_user(const chat *c, const char *name, const char *host, const char *mailbox) {
+    if (!ieq(c->nick, name) || (mailbox && *mailbox)) return 0;
+    return !host || !*host || !*c->host || ieq(host, c->host);
+}
+
+/* Web mailboxes (WEB.md): honoured only when exactly name@origin(host). */
+static int valid_mailbox(const char *name, const char *host, const char *mailbox) {
+    char want[96];
+    size_t i, n;
+    if (!mailbox || !*mailbox || !name || !*name || strchr(mailbox, '.')) return 0;
+    n = snprintf(want, sizeof want, "%s@", name);
+    if (n >= sizeof want) return 0;
+    for (i = 0; host[i] && n + 1 < sizeof want; i++) {
+        char ch = host[i];
+        want[n++] = (isalnum((unsigned char)ch) || ch == '_' || ch == '-') ? ch : '_';
+    }
+    want[n] = 0;
+    return ieq(want, mailbox);
+}
+
+static void remember_peer(chat *c, const char *name, const char *host, const char *mailbox) {
+    int i;
+    chat_peer *p = NULL;
+    if (!name || !*name) return;
+    for (i = 0; i < c->npeers; i++)
+        if (ieq(c->peers[i].name, name)) { p = &c->peers[i]; break; }
+    if (!p) {
+        if (c->npeers < CHAT_PEERS) p = &c->peers[c->npeers++];
+        else p = &c->peers[(c->seq) % CHAT_PEERS]; /* evict someone */
+    }
+    snprintf(p->name, sizeof p->name, "%s", name);
+    snprintf(p->host, sizeof p->host, "%s", host ? host : "");
+    if (valid_mailbox(name, host ? host : "", mailbox)) snprintf(p->mailbox, sizeof p->mailbox, "%s", mailbox);
+    else p->mailbox[0] = 0;
+}
+
+static const char *pm_target(chat *c, const char *name) {
+    int i;
+    for (i = 0; i < c->npeers; i++)
+        if (ieq(c->peers[i].name, name)) return c->peers[i].mailbox[0] ? c->peers[i].mailbox : c->peers[i].name;
+    return name;
+}
+
+/* ---- outbound -------------------------------------------------------- */
+
+static void send_subscribe(chat *c, const char *name) {
+    char loc[128];
+    loc_messages(loc, sizeof loc, name);
+    emit(c, proto_subscribe(out_buf, OUT_CAP, loc, c->nick, c->host));
+}
+
+static void send_unsubscribe(chat *c, const char *name) {
+    char loc[128];
+    loc_messages(loc, sizeof loc, name);
+    emit(c, proto_unsubscribe(out_buf, OUT_CAP, loc));
+}
+
+static void send_slice(chat *c, const char *name, int n) {
+    char loc[128];
+    loc_history(loc, sizeof loc, name);
+    emit(c, proto_slice(out_buf, OUT_CAP, loc, -n));
+}
+
+static void send_who(chat *c, const char *name) {
+    char loc[128];
+    loc_messages(loc, sizeof loc, name);
+    emit(c, proto_who(out_buf, OUT_CAP, loc));
+}
+
+void chat_connected(chat *c) {
+    c->connected = 1;
+    c->last_rx_ms = now_ms(c);
+    c->last_ping_ms = c->last_rx_ms;
+    chat_notice(c, "Connected. Joining #%s ...", c->channel);
+    send_subscribe(c, c->channel);
+    if (c->nick[0]) send_subscribe(c, c->nick);
+    if (c->history_count > 0) send_slice(c, c->channel, c->history_count);
+    send_who(c, c->channel);
+}
+
+void chat_disconnected(chat *c, const char *why) {
+    if (c->connected || why) chat_notice(c, "Disconnected%s%s", why && *why ? ": " : ".", why ? why : "");
+    c->connected = 0;
+    c->users = 0;
+    c->roster[0] = 0;
+}
+
+void chat_join(chat *c, const char *channel) {
+    char name[CHAT_CHANNEL];
+    size_t i, n = 0;
+    for (i = 0; channel[i] && n + 1 < sizeof name; i++) {
+        char ch = channel[i];
+        if (ch == '#' && n == 0) continue;
+        if (isalnum((unsigned char)ch) || ch == '_' || ch == '-') name[n++] = ch;
+        else { chat_notice(c, "Room names are letters, digits, - and _."); return; }
+    }
+    name[n] = 0;
+    if (n == 0) { chat_notice(c, "Usage: /join <room>"); return; }
+    if (ieq(name, c->channel)) { chat_notice(c, "You are already in #%s.", c->channel); return; }
+    if (c->connected) send_unsubscribe(c, c->channel);
+    chat_set_channel(c, name);
+    c->count = 0;
+    c->head = 0;
+    c->users = 0;
+    c->roster[0] = 0;
+    c->seq++;
+    if (c->connected) {
+        chat_notice(c, "Joining #%s ...", c->channel);
+        send_subscribe(c, c->channel);
+        if (c->history_count > 0) send_slice(c, c->channel, c->history_count);
+        send_who(c, c->channel);
+    } else {
+        chat_notice(c, "Will join #%s when connected.", c->channel);
+    }
+}
+
+static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm, const char *shown_as) {
+    char loc[128];
+    long long t = now_ms(c);
+    chat_msg *m;
+    loc_messages(loc, sizeof loc, dest);
+    emit(c, proto_message(out_buf, OUT_CAP, "WRITE", loc, c->nick_json, utf8, t));
+    loc_history(loc, sizeof loc, dest);
+    emit(c, proto_message(out_buf, OUT_CAP, "PUSH", loc, c->nick_json, utf8, t));
+    remember_sent(c, t, utf8);
+    m = ring_push(c);
+    m->kind = is_pm ? MSG_PRIVATE : MSG_CHAT;
+    m->self = 1;
+    m->time = t;
+    copy_cp437(m->name, sizeof m->name, c->nick);
+    copy_cp437(m->host, sizeof m->host, c->host);
+    if (c->has_avatar) { memcpy(m->avatar, c->avatar, AVATAR_BYTES); m->has_avatar = 1; }
+    if (is_pm) {
+        char tmp[CHAT_TEXT];
+        snprintf(tmp, sizeof tmp, "-> %s: %s", shown_as, utf8);
+        m->textlen = (int)cp437_from_utf8(tmp, strlen(tmp), m->text, sizeof m->text);
+    } else {
+        m->textlen = (int)cp437_from_utf8(utf8, strlen(utf8), m->text, sizeof m->text);
+    }
+}
+
+static void help(chat *c) {
+    chat_notice(c, "Commands: /join <room>  /who  /rooms  /msg <name> <text>  /r <text>  /compact  /quit");
+}
+
+void chat_input(chat *c, const unsigned char *line, size_t n) {
+    char utf8[CHAT_TEXT * 3 + 1];
+    char *p;
+    while (n > 0 && line[n - 1] == ' ') n--;
+    while (n > 0 && line[0] == ' ') { line++; n--; }
+    if (n == 0) return;
+    if (n > 1000) n = 1000;
+    cp437_to_utf8(line, n, utf8, sizeof utf8);
+    p = utf8;
+    if (*p != '/') {
+        if (!c->connected) { chat_notice(c, "Not connected."); return; }
+        send_text_to(c, c->channel, utf8, 0, NULL);
+        return;
+    }
+    p++;
+    if (ieq(p, "quit") || ieq(p, "exit") || ieq(p, "q")) { c->want_quit = 1; return; }
+    if (ieq(p, "help") || ieq(p, "?")) { help(c); return; }
+    if (ieq(p, "compact")) { c->toggle_compact = 1; return; }
+    if (ieq(p, "who")) {
+        if (!c->connected) { chat_notice(c, "Not connected."); return; }
+        send_who(c, c->channel);
+        return;
+    }
+    if (ieq(p, "rooms")) {
+        if (!c->connected) { chat_notice(c, "Not connected."); return; }
+        emit(c, proto_keys(out_buf, OUT_CAP, "public_channels"));
+        return;
+    }
+    if (strncmp(p, "join ", 5) == 0 || strncmp(p, "j ", 2) == 0) {
+        p = strchr(p, ' ') + 1;
+        while (*p == ' ') p++;
+        chat_join(c, p);
+        return;
+    }
+    if (strncmp(p, "msg ", 4) == 0 || strncmp(p, "m ", 2) == 0 || strncmp(p, "private ", 8) == 0) {
+        char name[CHAT_NAME];
+        size_t k = 0;
+        p = strchr(p, ' ') + 1;
+        while (*p == ' ') p++;
+        while (*p && *p != ' ' && k + 1 < sizeof name) name[k++] = *p++;
+        name[k] = 0;
+        while (*p == ' ') p++;
+        if (!k || !*p) { chat_notice(c, "Usage: /msg <name> <text>"); return; }
+        if (!c->connected) { chat_notice(c, "Not connected."); return; }
+        send_text_to(c, pm_target(c, name), p, 1, name);
+        return;
+    }
+    if (strncmp(p, "r ", 2) == 0) {
+        p += 2;
+        while (*p == ' ') p++;
+        if (!c->last_pm_from[0]) { chat_notice(c, "Nobody has messaged you yet."); return; }
+        if (!*p) { chat_notice(c, "Usage: /r <text>"); return; }
+        if (!c->connected) { chat_notice(c, "Not connected."); return; }
+        send_text_to(c, pm_target(c, c->last_pm_from), p, 1, c->last_pm_from);
+        return;
+    }
+    chat_notice(c, "Unknown command. /help lists them.");
+}
+
+void chat_tick(chat *c) {
+    long long t = now_ms(c);
+    if (!c->connected) return;
+    if (t - c->last_ping_ms >= 60000) {
+        c->last_ping_ms = t;
+        emit(c, proto_ping(out_buf, OUT_CAP, t));
+    }
+}
+
+/* ---- inbound --------------------------------------------------------- */
+
+static int is_marker(const char *s, const char *prefix) {
+    return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+/* Appends one wire message to the ring; live=1 for an UPDATE, 0 for history. */
+static void take_message(chat *c, const json_val *msg, int private_box, int live) {
+    const json_val *nick = json_get(msg, "nick");
+    const char *name = json_str(json_get(nick, "name"), "");
+    const char *host = json_str(json_get(nick, "host"), "");
+    const char *mailbox = json_str(json_get(nick, "mailbox"), "");
+    const char *avatar = json_str(json_get(nick, "avatar"), "");
+    const char *str = json_str(json_get(msg, "str"), "");
+    long long t = json_int(json_get(msg, "time"), 0);
+    chat_msg *m;
+    int self;
+
+    remember_peer(c, name, host, mailbox);
+    self = same_user(c, name, host, mailbox);
+    if (self && live && recent_self(c, t, str)) return;
+
+    if (is_marker(str, "[TVTUNER|")) return;
+    if (is_marker(str, "[BITMAP|")) {
+        if (live) chat_notice(c, "%s sent an image (not shown here).", name);
+        return;
+    }
+    m = ring_push(c);
+    m->kind = private_box ? MSG_PRIVATE : MSG_CHAT;
+    m->self = self;
+    m->time = t;
+    copy_cp437(m->name, sizeof m->name, name);
+    copy_cp437(m->host, sizeof m->host, host);
+    m->textlen = (int)cp437_from_utf8(str, strlen(str), m->text, sizeof m->text);
+    if (*avatar && avatar_from_base64(avatar, strlen(avatar), m->avatar)) m->has_avatar = 1;
+    if (private_box && !self) snprintf(c->last_pm_from, sizeof c->last_pm_from, "%s", name);
+}
+
+/* "channels.<name>.<leaf>" -> name and leaf; 0 when not that shape. */
+static int split_location(const char *loc, char *name, size_t ncap, const char **leaf) {
+    const char *p, *q;
+    size_t k;
+    if (strncmp(loc, "channels.", 9) != 0) return 0;
+    p = loc + 9;
+    q = strchr(p, '.');
+    if (!q) return 0;
+    k = (size_t)(q - p);
+    if (k == 0 || k >= ncap) return 0;
+    memcpy(name, p, k);
+    name[k] = 0;
+    *leaf = q + 1;
+    return 1;
+}
+
+static void handle_update(chat *c, const proto_packet *pk) {
+    char name[CHAT_CHANNEL + CHAT_NAME];
+    const char *leaf;
+    int private_box;
+    if (!split_location(pk->location, name, sizeof name, &leaf)) return;
+    if (strcmp(leaf, "messages") != 0) return;
+    private_box = ieq(name, c->nick);
+    if (!private_box && !ieq(name, c->channel)) return;
+
+    if (ieq(pk->oper, "WRITE")) {
+        if (pk->data && pk->data->type == J_OBJECT) take_message(c, pk->data, private_box, 1);
+    } else if (ieq(pk->oper, "SUBSCRIBE") || ieq(pk->oper, "UNSUBSCRIBE")) {
+        const char *who = json_str(json_get(pk->data, "nick"), "");
+        const char *sys = json_str(json_get(pk->data, "system"), "");
+        int joined = ieq(pk->oper, "SUBSCRIBE");
+        if (private_box || !*who) return;
+        if (ieq(who, c->nick) && (!*sys || !*c->host || ieq(sys, c->host))) return;
+        chat_notice(c, joined ? "%s is here." : "%s has left.", who);
+        if (joined) c->users++; else if (c->users > 0) c->users--;
+    }
+}
+
+static void handle_response(chat *c, const proto_packet *pk) {
+    char name[CHAT_CHANNEL + CHAT_NAME];
+    const char *leaf = "";
+    if (ieq(pk->oper, "SLICE")) {
+        const json_val *m;
+        int shown = 0;
+        if (!split_location(pk->location, name, sizeof name, &leaf) || strcmp(leaf, "history") != 0) return;
+        if (!ieq(name, c->channel) || !pk->data || pk->data->type != J_ARRAY) return;
+        for (m = pk->data->first; m; m = m->next) {
+            if (m->type != J_OBJECT) continue;
+            take_message(c, m, 0, 0);
+            shown++;
+        }
+        if (shown == 0) chat_notice(c, "No history in #%s yet.", c->channel);
+    } else if (ieq(pk->oper, "WHO")) {
+        const json_val *e;
+        size_t n = 0;
+        int count = 0;
+        if (!pk->data || pk->data->type != J_ARRAY) return;
+        c->roster[0] = 0;
+        for (e = pk->data->first; e; e = e->next) {
+            const char *who = e->type == J_STRING ? e->str : json_str(json_get(e, "nick"), "");
+            const char *sys = e->type == J_STRING ? "" : json_str(json_get(e, "system"), "");
+            int k;
+            if (!*who) continue;
+            count++;
+            k = snprintf(c->roster + n, sizeof c->roster - n, "%s%s%s%s%s", n ? ", " : "", who,
+                         *sys ? " (" : "", sys, *sys ? ")" : "");
+            if (k < 0 || n + (size_t)k >= sizeof c->roster) { c->roster[n] = 0; break; }
+            n += (size_t)k;
+        }
+        c->users = count;
+        chat_notice(c, "Users in #%s (%d): %s", c->channel, count, c->roster[0] ? c->roster : "nobody");
+    } else if (ieq(pk->oper, "KEYS")) {
+        char list[CHAT_TEXT];
+        size_t n = 0;
+        const json_val *e;
+        if (!pk->data) { chat_notice(c, "No public rooms are registered."); return; }
+        list[0] = 0;
+        for (e = pk->data->first; e; e = e->next) {
+            const char *room = e->type == J_STRING ? e->str : e->key;
+            int k;
+            if (!room || !*room) continue;
+            k = snprintf(list + n, sizeof list - n, "%s#%s", n ? ", " : "", room);
+            if (k < 0 || n + (size_t)k >= sizeof list) break;
+            n += (size_t)k;
+        }
+        chat_notice(c, "Rooms: %s", list[0] ? list : "none registered");
+    }
+}
+
+void chat_feed_line(chat *c, const char *line, size_t n) {
+    json_arena a;
+    proto_packet pk;
+    json_arena_init(&a, arena_mem, ARENA_CAP);
+    c->last_rx_ms = now_ms(c);
+    if (!proto_parse(line, n, &a, &pk)) return;
+    if (ieq(pk.func, "PING")) {
+        emit(c, proto_pong(out_buf, OUT_CAP, now_ms(c)));
+    } else if (ieq(pk.func, "UPDATE")) {
+        handle_update(c, &pk);
+    } else if (ieq(pk.func, "RESPONSE")) {
+        handle_response(c, &pk);
+    } else if (ieq(pk.func, "ERROR")) {
+        chat_notice(c, "Server: %s", json_str(json_get(pk.data, "description"), "error"));
+    }
+}

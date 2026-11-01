@@ -1,0 +1,10 @@
+build/
+build-host/
+avatar_chat_host
+*.elf
+*.self
+*.pkg
+*.map
+*.o
+*.d
+avatar.bin

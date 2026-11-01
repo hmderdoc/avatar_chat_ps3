@@ -1,0 +1,40 @@
+# Host build: the same client on a Linux/macOS terminal, plus the unit
+# tests. The PS3 build is the main Makefile (PSL1GHT).
+#
+#   make -f Makefile.host          builds ./avatar_chat_host
+#   make -f Makefile.host test     builds and runs the core tests
+
+CC      ?= cc
+CFLAGS  ?= -O2 -g -std=c99 -Wall -Wextra -Wno-unused-parameter
+CFLAGS  += -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
+BUILD   := build-host
+
+CORE    := $(wildcard src/core/*.c)
+APP     := src/main.c src/config.c
+HOST    := src/platform/host/platform_host.c
+
+all: avatar_chat_host
+
+avatar_chat_host: $(CORE) $(APP) $(HOST) $(wildcard src/*.h src/core/*.h)
+	$(CC) $(CFLAGS) -Isrc -o $@ $(CORE) $(APP) $(HOST)
+
+$(BUILD)/test_core: tests/test_core.c $(CORE) src/config.c $(wildcard src/core/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_core.c $(CORE) src/config.c
+
+test: $(BUILD)/test_core
+	./$(BUILD)/test_core
+
+clean:
+	rm -rf avatar_chat_host $(BUILD)
+
+.PHONY: all test clean
+
+# Syntax-check the PS3 platform file against the header shim in
+# tests/ps3shim (no PS3 toolchain needed; see tests/ps3shim/README.md).
+check-ps3:
+	$(CC) -std=gnu99 -Wall -Wextra -Wno-unused-parameter -fsyntax-only -nostdinc \
+	  -isystem tests/ps3shim -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu \
+	  -isystem $$($(CC) -print-file-name=include) -Isrc src/platform/ps3/platform_ps3.c
+
+.PHONY: check-ps3

@@ -1,0 +1,303 @@
+/* Host platform: a POSIX terminal and BSD sockets. For developing and
+ * testing the client without a PS3; it also works as a plain Linux/macOS
+ * client. The terminal must show UTF-8. */
+#define _GNU_SOURCE
+#include "../../platform.h"
+#include "../../core/cp437.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <termios.h>
+#include <time.h>
+#include <sys/time.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+
+static struct termios g_saved;
+static int g_raw;
+static volatile sig_atomic_t g_quit;
+static char g_base[512] = "./";
+static FILE *g_log;
+
+static void on_signal(int sig) { (void)sig; g_quit = 1; }
+
+void plat_set_argv0(const char *argv0) { (void)argv0; }
+
+int plat_init(const plat_options *opt) {
+    struct termios t;
+    const char *env;
+    (void)opt;
+    env = getenv("AVATAR_CHAT_DIR");
+    if (env && *env) snprintf(g_base, sizeof g_base, "%s%s", env, env[strlen(env) - 1] == '/' ? "" : "/");
+    if (!g_log && getenv("AVATAR_CHAT_LOG")) g_log = fopen(getenv("AVATAR_CHAT_LOG"), "a");
+    if (g_raw) return 0;
+    if (!isatty(STDIN_FILENO)) {
+        /* Allowed (tests drive us through a pty normally), but no raw mode. */
+    } else {
+        tcgetattr(STDIN_FILENO, &g_saved);
+        t = g_saved;
+        t.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+        t.c_iflag &= ~(IXON | ICRNL | INLCR);
+        t.c_oflag &= ~(OPOST);
+        t.c_cc[VMIN] = 0;
+        t.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &t);
+    }
+    g_raw = 1;
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
+    fputs("\x1b[?1049h\x1b[?25l\x1b[2J", stdout);
+    fflush(stdout);
+    return 0;
+}
+
+void plat_shutdown(void) {
+    if (!g_raw) return;
+    fputs("\x1b[0m\x1b[?25h\x1b[?1049l", stdout);
+    fflush(stdout);
+    if (isatty(STDIN_FILENO)) tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
+    g_raw = 0;
+}
+
+const char *plat_base_dir(void) { return g_base; }
+
+void plat_screen_size(int *cols, int *rows) {
+    struct winsize ws;
+    *cols = 80; *rows = 25;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        *cols = ws.ws_col;
+        *rows = ws.ws_row;
+    }
+    if (*cols > UI_MAX_COLS) *cols = UI_MAX_COLS;
+    if (*rows > UI_MAX_ROWS) *rows = UI_MAX_ROWS;
+    if (*cols < 40) *cols = 40;
+    if (*rows < 10) *rows = 10;
+}
+
+static const int ansi_of_cga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
+
+void plat_present(const screen *s) {
+    static char out[UI_MAX_COLS * UI_MAX_ROWS * 24];
+    size_t n = 0;
+    int y, x, last_attr = -1;
+    n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[H");
+    for (y = 0; y < s->rows; y++) {
+        if (y) n += (size_t)snprintf(out + n, sizeof out - n, "\r\n");
+        for (x = 0; x < s->cols; x++) {
+            const cell *c = &s->cells[y * s->cols + x];
+            char u[4];
+            size_t k;
+            if (c->attr != last_attr) {
+                int fg = c->attr & 15, bg = (c->attr >> 4) & 7;
+                n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[0;%d%s;%dm",
+                                      30 + ansi_of_cga[fg & 7], fg & 8 ? ";1" : "", 40 + ansi_of_cga[bg]);
+                last_attr = c->attr;
+            }
+            k = cp437_byte_to_utf8(c->ch, u);
+            if (n + k + 64 > sizeof out) break;
+            memcpy(out + n, u, k);
+            n += k;
+        }
+    }
+    if (s->cur_x >= 0 && s->cur_y >= 0)
+        n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[%d;%dH\x1b[?25h", s->cur_y + 1, s->cur_x + 1);
+    else
+        n += (size_t)snprintf(out + n, sizeof out - n, "\x1b[?25l");
+    fwrite(out, 1, n, stdout);
+    fflush(stdout);
+}
+
+/* ---- keys: a small escape-sequence decoder ----------------------------- */
+
+static unsigned char kbuf[64];
+static int klen;
+
+static int fill_keys(int wait_ms) {
+    fd_set r;
+    struct timeval tv;
+    int got;
+    if (klen >= (int)sizeof kbuf) return 0;
+    FD_ZERO(&r);
+    FD_SET(STDIN_FILENO, &r);
+    tv.tv_sec = 0;
+    tv.tv_usec = wait_ms * 1000;
+    if (select(STDIN_FILENO + 1, &r, NULL, NULL, &tv) <= 0) return 0;
+    got = (int)read(STDIN_FILENO, kbuf + klen, sizeof kbuf - (size_t)klen);
+    if (got <= 0) {
+        if (got == 0) g_quit = 1; /* stdin closed */
+        return 0;
+    }
+    klen += got;
+    return got;
+}
+
+static void consume(int n) {
+    memmove(kbuf, kbuf + n, (size_t)(klen - n));
+    klen -= n;
+}
+
+/* Decode one UTF-8 character from the front of kbuf into a CP437 key. */
+static int take_utf8(void) {
+    unsigned char c = kbuf[0];
+    int need = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+    unsigned char out[4];
+    size_t n;
+    if (klen < need) fill_keys(20);
+    if (klen < need) need = klen;
+    n = cp437_from_utf8((const char *)kbuf, (size_t)need, out, sizeof out);
+    consume(need);
+    return n ? out[0] : KEY_NONE;
+}
+
+int plat_poll_key(void) {
+    if (klen == 0 && fill_keys(0) == 0) return KEY_NONE;
+    if (klen == 0) return KEY_NONE;
+    {
+        unsigned char c = kbuf[0];
+        if (c == 0x1b) {
+            if (klen == 1) fill_keys(30);
+            if (klen == 1) { consume(1); return KEY_ESC; }
+            if (kbuf[1] == '[' || kbuf[1] == 'O') {
+                int i = 2, num = 0;
+                while (i < klen && kbuf[i] >= '0' && kbuf[i] <= '9') num = num * 10 + (kbuf[i++] - '0');
+                if (i < klen && kbuf[i] == ';') { i++; while (i < klen && kbuf[i] >= '0' && kbuf[i] <= '9') i++; }
+                if (i >= klen) { fill_keys(30); if (i >= klen) { consume(klen); return KEY_NONE; } }
+                {
+                    unsigned char f = kbuf[i];
+                    consume(i + 1);
+                    switch (f) {
+                    case 'A': return KEY_UP;
+                    case 'B': return KEY_DOWN;
+                    case 'C': return KEY_RIGHT;
+                    case 'D': return KEY_LEFT;
+                    case 'H': return KEY_HOME;
+                    case 'F': return KEY_END;
+                    case 'P': return KEY_F1;
+                    case 'Q': return KEY_F2;
+                    case '~':
+                        switch (num) {
+                        case 1: case 7: return KEY_HOME;
+                        case 4: case 8: return KEY_END;
+                        case 3: return KEY_DELETE;
+                        case 5: return KEY_PGUP;
+                        case 6: return KEY_PGDN;
+                        case 11: return KEY_F1;
+                        case 12: return KEY_F2;
+                        default: return KEY_NONE;
+                        }
+                    default: return KEY_NONE;
+                    }
+                }
+            }
+            consume(1);
+            return KEY_ESC;
+        }
+        if (c == '\r' || c == '\n') { consume(1); return KEY_ENTER; }
+        if (c == 0x7f || c == 0x08) { consume(1); return KEY_BACKSPACE; }
+        if (c == '\t') { consume(1); return KEY_TAB; }
+        if (c == 0x03) { consume(1); return KEY_QUIT; }
+        if (c == 0x0c) { consume(1); return KEY_TOGGLE_COMPACT; } /* Ctrl-L */
+        if (c < 0x20) { consume(1); return KEY_NONE; }
+        return take_utf8();
+    }
+}
+
+int plat_quit_requested(void) { return g_quit; }
+
+long long plat_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+void plat_sleep_ms(int ms) {
+    /* Sleep on stdin so a key wakes us early. */
+    fd_set r;
+    struct timeval tv;
+    FD_ZERO(&r);
+    FD_SET(STDIN_FILENO, &r);
+    tv.tv_sec = 0;
+    tv.tv_usec = ms * 1000;
+    select(STDIN_FILENO + 1, &r, NULL, NULL, &tv);
+}
+
+/* ---- sockets ----------------------------------------------------------- */
+
+int net_connect(const char *host, int port, char *err, size_t errcap) {
+    struct addrinfo hints, *res = NULL, *ai;
+    char portstr[16];
+    int fd = -1, rc;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(portstr, sizeof portstr, "%d", port);
+    rc = getaddrinfo(host, portstr, &hints, &res);
+    if (rc != 0) { snprintf(err, errcap, "%s", gai_strerror(rc)); return -1; }
+    for (ai = res; ai; ai = ai->ai_next) {
+        struct timeval tv;
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        tv.tv_sec = 10; tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        snprintf(err, errcap, "%s", strerror(errno));
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) { if (!*err) snprintf(err, errcap, "no address"); return -1; }
+    {
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    }
+    return fd;
+}
+
+int net_recv(int fd, char *buf, size_t cap) {
+    fd_set r;
+    struct timeval tv;
+    ssize_t got;
+    FD_ZERO(&r);
+    FD_SET(fd, &r);
+    tv.tv_sec = 0; tv.tv_usec = 0;
+    if (select(fd + 1, &r, NULL, NULL, &tv) <= 0) return 0;
+    got = recv(fd, buf, cap, 0);
+    if (got == 0) return -1;
+    if (got < 0) return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+    return (int)got;
+}
+
+int net_send_all(int fd, const char *buf, size_t n) {
+    while (n > 0) {
+        ssize_t w = send(fd, buf, n, 0);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        buf += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+void net_close(int fd) { close(fd); }
+
+void plat_log(const char *fmt, ...) {
+    va_list ap;
+    if (!g_log) return;
+    va_start(ap, fmt);
+    vfprintf(g_log, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_log);
+    fflush(g_log);
+}

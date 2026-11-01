@@ -1,0 +1,348 @@
+/* Unit tests for the portable core. Build and run: make -f Makefile.host test */
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#include "core/json.h"
+#include "core/proto.h"
+#include "core/chat.h"
+#include "core/cp437.h"
+#include "core/base64.h"
+#include "core/avatar.h"
+#include "core/ui.h"
+#include "config.h"
+
+static int fails, checks;
+#define CHECK(cond) do { checks++; if (!(cond)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
+
+static char arena_mem[256 * 1024];
+
+static void test_json(void) {
+    json_arena a;
+    json_val *v;
+    json_arena_init(&a, arena_mem, sizeof arena_mem);
+    {
+        const char *doc = "{\"a\":1,\"b\":[true,null,\"x\\u00e9\\ud83d\\ude00\"],\"c\":{\"d\":-2.5},\"e\":\"q\\\"\\\\\\n\"}";
+        v = json_parse(doc, strlen(doc), &a);
+    }
+    CHECK(v && v->type == J_OBJECT && v->len == 4);
+    CHECK(json_int(json_get(v, "a"), 0) == 1);
+    CHECK(json_index(json_get(v, "b"), 0)->boolean == 1);
+    CHECK(json_index(json_get(v, "b"), 1)->type == J_NULL);
+    CHECK(strcmp(json_str(json_index(json_get(v, "b"), 2), ""), "x\xc3\xa9\xf0\x9f\x98\x80") == 0);
+    CHECK(json_get(json_get(v, "c"), "d")->num == -2.5);
+    CHECK(strcmp(json_str(json_get(v, "e"), ""), "q\"\\\n") == 0);
+    CHECK(json_get(v, "zz") == NULL);
+    CHECK(json_parse("{\"a\":}", 6, &a) == NULL);
+    CHECK(json_parse("[1,2", 4, &a) == NULL);
+    CHECK(json_parse("1761000000000", 13, &a) != NULL);
+    v = json_parse("1761000000000", 13, &a);
+    CHECK(v && v->is_int && v->inum == 1761000000000LL);
+    {
+        char out[64];
+        size_t n = json_escape("a\"b\\c\n\x01\xc3\xa9\xff", 10, out, sizeof out);
+        CHECK(strcmp(out, "\"a\\\"b\\\\c\\n\\u0001\xc3\xa9?\"") == 0);
+        CHECK(n == strlen(out));
+    }
+}
+
+static int lines_seen;
+static char last_line[256];
+static void on_line(void *ctx, const char *line, size_t n) {
+    (void)ctx;
+    lines_seen++;
+    snprintf(last_line, sizeof last_line, "%.*s", (int)n, line);
+}
+
+static void test_framing(void) {
+    static proto_reader r;
+    proto_reader_init(&r);
+    lines_seen = 0;
+    proto_feed(&r, "{\"a\":1}\r\n{\"b\"", 13, on_line, NULL);
+    CHECK(lines_seen == 1 && strcmp(last_line, "{\"a\":1}") == 0);
+    proto_feed(&r, ":2}\n\n{\"c\":3}\r\n", 14, on_line, NULL);
+    CHECK(lines_seen == 3 && strcmp(last_line, "{\"c\":3}") == 0);
+    {
+        /* An oversize line is dropped, the next one survives. */
+        static char big[PROTO_MAX_PACKET + 10];
+        memset(big, 'x', sizeof big);
+        proto_feed(&r, big, sizeof big, on_line, NULL);
+        proto_feed(&r, "\n{\"d\":4}\n", 9, on_line, NULL);
+        CHECK(lines_seen == 4 && strcmp(last_line, "{\"d\":4}") == 0);
+        CHECK(r.overflow == 1);
+    }
+}
+
+static void test_builders(void) {
+    char out[4096], nick[256];
+    json_arena a;
+    proto_packet pk;
+    size_t n;
+    json_arena_init(&a, arena_mem, sizeof arena_mem);
+    n = proto_subscribe(out, sizeof out, "channels.main.messages", "SiX", "PS3");
+    CHECK(n > 0 && strcmp(out, "{\"scope\":\"chat\",\"func\":\"QUERY\",\"oper\":\"SUBSCRIBE\",\"location\":\"channels.main.messages\",\"nick\":\"SiX\",\"system\":\"PS3\",\"timeout\":-1}\r\n") == 0);
+    CHECK(proto_nick_json(nick, sizeof nick, "SiX", "PS3", "QUJD") > 0);
+    CHECK(strcmp(nick, "{\"name\":\"SiX\",\"host\":\"PS3\",\"avatar\":\"QUJD\"}") == 0);
+    n = proto_message(out, sizeof out, "WRITE", "channels.main.messages", nick, "hi \"there\"", 1761000000000LL);
+    CHECK(n > 0);
+    CHECK(proto_parse(out, n - 2, &a, &pk));
+    CHECK(strcmp(pk.oper, "WRITE") == 0 && strcmp(pk.location, "channels.main.messages") == 0);
+    CHECK(strcmp(json_str(json_get(pk.data, "str"), ""), "hi \"there\"") == 0);
+    CHECK(json_int(json_get(pk.data, "time"), 0) == 1761000000000LL);
+    CHECK(json_int(json_get(json_parse(out, n - 2, &a), "lock"), 0) == 2);
+    n = proto_slice(out, sizeof out, "channels.main.history", -40);
+    CHECK(strstr(out, "\"data\":{\"start\":-40}") && strstr(out, "\"lock\":1"));
+    n = proto_pong(out, sizeof out, 5);
+    CHECK(strcmp(out, "{\"scope\":\"SOCKET\",\"func\":\"PONG\",\"data\":5}\r\n") == 0);
+    CHECK(proto_message(out, 16, "WRITE", "x", nick, "too small", 1) == 0);
+}
+
+static void test_cp437(void) {
+    unsigned char out[32];
+    char u[64];
+    size_t n = cp437_from_utf8("A\xc3\xa9\xe2\x96\x88\xe2\x82\xac\t\x01z", 13, out, sizeof out);
+    CHECK(n == 6 && out[0] == 'A' && out[1] == 0x82 && out[2] == 0xDB && out[3] == '?' && out[4] == ' ' && out[5] == 'z');
+    n = cp437_to_utf8(out, 3, u, sizeof u);
+    CHECK(strcmp(u, "A\xc3\xa9\xe2\x96\x88") == 0 && n == 6);
+    n = cp437_from_utf8("\xff\xfe", 2, out, sizeof out);
+    CHECK(n == 2 && out[0] == '?' && out[1] == '?');
+}
+
+static void test_avatar(void) {
+    unsigned char av[AVATAR_BYTES], got[AVATAR_BYTES];
+    char b64[256];
+    static unsigned char coll[AVATAR_BYTES * 2 + 128];
+    int i;
+    for (i = 0; i < AVATAR_BYTES; i += 2) { av[i] = 0xB1; av[i + 1] = 0x1E; }
+    CHECK(avatar_valid(av));
+    base64_encode(av, AVATAR_BYTES, b64, sizeof b64);
+    CHECK(strlen(b64) == 160);
+    CHECK(avatar_from_base64(b64, strlen(b64), got) && memcmp(av, got, AVATAR_BYTES) == 0);
+    av[3] = 0x9E; /* blink */
+    CHECK(!avatar_valid(av));
+    av[3] = 0x1E; av[0] = 0x1B;
+    CHECK(!avatar_valid(av));
+    av[0] = 0xB1;
+    /* Collection with a SAUCE trailer. */
+    memcpy(coll, av, AVATAR_BYTES);
+    memcpy(coll + AVATAR_BYTES, av, AVATAR_BYTES);
+    coll[AVATAR_BYTES * 2 - 1] = 0x4F;
+    memset(coll + AVATAR_BYTES * 2, 0, 128);
+    memcpy(coll + AVATAR_BYTES * 2, "SAUCE00", 7);
+    CHECK(avatar_from_collection(coll, sizeof coll, 1, got) == 2 && got[AVATAR_BYTES - 1] == 0x4F);
+    CHECK(avatar_from_collection(coll, sizeof coll, 5, got) == 2);
+}
+
+/* A chat with a captured outbox. */
+static char outbox[16384];
+static size_t outlen;
+static long long fake_now = 1761000000000LL;
+static void cap_send(void *ctx, const char *b, size_t n) { (void)ctx; if (outlen + n < sizeof outbox) { memcpy(outbox + outlen, b, n); outlen += n; outbox[outlen] = 0; } }
+static long long cap_now(void *ctx) { (void)ctx; return fake_now; }
+static void feed(chat *c, const char *line) { chat_feed_line(c, line, strlen(line)); }
+static const char *last_text(const chat *c, char *buf, size_t cap) {
+    const chat_msg *m = chat_msg_at(c, c->count - 1);
+    if (!m) return "";
+    cp437_to_utf8(m->text, (size_t)m->textlen, buf, cap);
+    return buf;
+}
+
+static void test_chat(void) {
+    static chat c;
+    chat_io io;
+    char buf[2048];
+    io.ctx = NULL; io.send = cap_send; io.now_ms = cap_now;
+    chat_init(&c, &io);
+    chat_set_identity(&c, "SiX", "PS3", NULL);
+    chat_set_channel(&c, "main");
+    outlen = 0;
+    chat_connected(&c);
+    CHECK(strstr(outbox, "\"oper\":\"SUBSCRIBE\",\"location\":\"channels.main.messages\",\"nick\":\"SiX\",\"system\":\"PS3\""));
+    CHECK(strstr(outbox, "\"location\":\"channels.SiX.messages\""));
+    CHECK(strstr(outbox, "\"oper\":\"SLICE\",\"location\":\"channels.main.history\",\"data\":{\"start\":-40}"));
+    CHECK(strstr(outbox, "\"oper\":\"WHO\",\"location\":\"channels.main.messages\""));
+
+    /* History arrives: two messages, one with an avatar, one a marker. */
+    feed(&c, "{\"scope\":\"chat\",\"func\":\"RESPONSE\",\"oper\":\"SLICE\",\"location\":\"channels.main.history\",\"data\":["
+             "{\"nick\":{\"name\":\"alice\",\"host\":\"Future Land\"},\"str\":\"hello \\u2588 world\",\"time\":1760999000000},"
+             "{\"nick\":{\"name\":\"bob\"},\"str\":\"[BITMAP|x|y]\",\"time\":1760999100000},"
+             "{\"nick\":{\"name\":\"bob\"},\"str\":\"[TVTUNER|off]\",\"time\":1760999100001}]}");
+    CHECK(c.count == 2); /* the connect notice + alice */
+    CHECK(strcmp(last_text(&c, buf, sizeof buf), "hello \xe2\x96\x88 world") == 0);
+    CHECK(strcmp(chat_msg_at(&c, 1)->host, "Future Land") == 0 && chat_msg_at(&c, 1)->kind == MSG_CHAT);
+
+    /* WHO. */
+    feed(&c, "{\"func\":\"RESPONSE\",\"oper\":\"WHO\",\"location\":\"channels.main.messages\",\"data\":[{\"id\":1,\"nick\":\"alice\",\"system\":\"Future Land\"},{\"nick\":\"SiX\",\"system\":\"PS3\"}]}");
+    CHECK(c.users == 2 && strstr(last_text(&c, buf, sizeof buf), "Users in #main (2): alice (Future Land), SiX (PS3)"));
+
+    /* A live message, a join, a leave, our own presence is silent. */
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"alice\",\"host\":\"Future Land\",\"avatar\":\"" 
+             "sR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEesR6xHrEe\"},\"str\":\"hey SiX\",\"time\":1761000001000}}");
+    CHECK(c.count == 4 && strcmp(last_text(&c, buf, sizeof buf), "hey SiX") == 0);
+    CHECK(chat_msg_at(&c, 3)->has_avatar && chat_msg_at(&c, 3)->avatar[0] == 0xB1);
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"SUBSCRIBE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":\"carol\",\"system\":\"X\"}}");
+    CHECK(c.users == 3 && strcmp(last_text(&c, buf, sizeof buf), "carol is here.") == 0);
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"UNSUBSCRIBE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":\"carol\",\"system\":\"X\"}}");
+    CHECK(c.users == 2 && strcmp(last_text(&c, buf, sizeof buf), "carol has left.") == 0);
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"SUBSCRIBE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":\"SiX\",\"system\":\"PS3\"}}");
+    CHECK(c.count == 6 && c.users == 2);
+    /* Another room's traffic is ignored. */
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.other.messages\",\"data\":{\"nick\":{\"name\":\"z\"},\"str\":\"no\",\"time\":1}}");
+    CHECK(c.count == 6);
+
+    /* PING -> PONG. */
+    outlen = 0;
+    feed(&c, "{\"scope\":\"SOCKET\",\"func\":\"PING\",\"data\":123}");
+    CHECK(strcmp(outbox, "{\"scope\":\"SOCKET\",\"func\":\"PONG\",\"data\":1761000000000}\r\n") == 0);
+
+    /* Sending: WRITE + PUSH, local echo, server echo deduped. */
+    outlen = 0;
+    chat_input(&c, (const unsigned char *)"  hi all \x82 ", strlen("  hi all \x82 "));
+    CHECK(strstr(outbox, "\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"SiX\",\"host\":\"PS3\"},\"str\":\"hi all \xc3\xa9\",\"time\":1761000000000},\"lock\":2"));
+    CHECK(strstr(outbox, "\"oper\":\"PUSH\",\"location\":\"channels.main.history\""));
+    CHECK(c.count == 7 && chat_msg_at(&c, 6)->self && strcmp(last_text(&c, buf, sizeof buf), "hi all \xc3\xa9") == 0);
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"SiX\",\"host\":\"PS3\"},\"str\":\"hi all \xc3\xa9\",\"time\":1761000000000}}");
+    CHECK(c.count == 7);
+
+    /* Private message in, /r out to a web user's mailbox. */
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.SiX.messages\",\"data\":{\"nick\":{\"name\":\"dave\",\"host\":\"My BBS\",\"mailbox\":\"dave@My_BBS\"},\"str\":\"psst\",\"time\":1761000002000}}");
+    CHECK(c.count == 8 && chat_msg_at(&c, 7)->kind == MSG_PRIVATE && strcmp(c.last_pm_from, "dave") == 0);
+    outlen = 0;
+    chat_input(&c, (const unsigned char *)"/r yes?", strlen("/r yes?"));
+    CHECK(strstr(outbox, "\"location\":\"channels.dave@My_BBS.messages\""));
+    CHECK(strstr(outbox, "\"location\":\"channels.dave@My_BBS.history\""));
+    CHECK(strcmp(last_text(&c, buf, sizeof buf), "-> dave: yes?") == 0);
+    /* A forged mailbox is ignored: the PM goes to the plain name. */
+    feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"eve\",\"host\":\"x\",\"mailbox\":\"dave@My_BBS\"},\"str\":\"hi\",\"time\":1761000003000}}");
+    outlen = 0;
+    chat_input(&c, (const unsigned char *)"/msg eve hello", strlen("/msg eve hello"));
+    CHECK(strstr(outbox, "\"location\":\"channels.eve.messages\""));
+
+    /* /join: unsubscribe, subscribe, slice, who; ring cleared. */
+    outlen = 0;
+    chat_input(&c, (const unsigned char *)"/join #Lobby", strlen("/join #Lobby"));
+    CHECK(strstr(outbox, "\"oper\":\"UNSUBSCRIBE\",\"location\":\"channels.main.messages\""));
+    CHECK(strstr(outbox, "\"oper\":\"SUBSCRIBE\",\"location\":\"channels.Lobby.messages\""));
+    CHECK(strstr(outbox, "\"location\":\"channels.Lobby.history\""));
+    CHECK(strcmp(c.channel, "Lobby") == 0 && c.count == 1);
+    chat_input(&c, (const unsigned char *)"/join bad room!", strlen("/join bad room!"));
+    CHECK(strcmp(c.channel, "Lobby") == 0);
+
+    /* ERROR shows as a notice; /quit sets the flag; keepalive ping. */
+    feed(&c, "{\"func\":\"ERROR\",\"data\":{\"description\":\"slow down\"}}");
+    CHECK(strcmp(last_text(&c, buf, sizeof buf), "Server: slow down") == 0);
+    chat_input(&c, (const unsigned char *)"/quit", strlen("/quit"));
+    CHECK(c.want_quit == 1);
+    outlen = 0;
+    fake_now += 61000;
+    chat_tick(&c);
+    CHECK(strstr(outbox, "\"func\":\"PING\""));
+    outlen = 0;
+    chat_tick(&c);
+    CHECK(outlen == 0);
+}
+
+static void test_ring_wraps(void) {
+    static chat c;
+    chat_io io;
+    int i;
+    io.ctx = NULL; io.send = cap_send; io.now_ms = cap_now;
+    chat_init(&c, &io);
+    for (i = 0; i < CHAT_RING + 10; i++) chat_notice(&c, "n%d", i);
+    CHECK(c.count == CHAT_RING);
+    CHECK(chat_msg_at(&c, 0)->text[1] == '1' && chat_msg_at(&c, 0)->text[2] == '0'); /* n10 */
+    CHECK(chat_msg_at(&c, CHAT_RING) == NULL);
+}
+
+static void test_wrap_and_render(void) {
+    ui_seg segs[16];
+    int n = ui_wrap((const unsigned char *)"the quick brown fox jumps", 25, 10, segs, 16);
+    CHECK(n == 3 && segs[0].len == 9 && segs[1].start == 10 && segs[1].len == 9 && segs[2].start == 20 && segs[2].len == 5);
+    n = ui_wrap((const unsigned char *)"abcdefghijklmnop", 16, 5, segs, 16);
+    CHECK(n == 4 && segs[3].start == 15);
+    n = ui_wrap((const unsigned char *)"", 0, 5, segs, 16);
+    CHECK(n == 1 && segs[0].len == 0);
+    {
+        static chat c;
+        static ui u;
+        static screen s;
+        chat_io io;
+        char row[UI_MAX_COLS + 1];
+        int x, found = 0, y;
+        io.ctx = NULL; io.send = cap_send; io.now_ms = cap_now;
+        chat_init(&c, &io);
+        chat_set_identity(&c, "SiX", "PS3", NULL);
+        ui_init(&u);
+        u.mode = UI_CHAT;
+        feed(&c, "{\"func\":\"UPDATE\",\"oper\":\"WRITE\",\"location\":\"channels.main.messages\",\"data\":{\"nick\":{\"name\":\"alice\",\"host\":\"FL\"},\"str\":\"hello there\",\"time\":1760999999000}}");
+        s.cols = 80; s.rows = 25;
+        ui_render(&u, &c, &s, fake_now, "online");
+        for (x = 0; x < 80; x++) row[x] = (char)s.cells[x].ch;
+        row[80] = 0;
+        CHECK(strncmp(row, " Avatar Chat  #main  0 users", 28) == 0);
+        for (y = 1; y < 22 && !found; y++) {
+            for (x = 0; x < 80; x++) row[x] = (char)s.cells[y * 80 + x].ch;
+            row[80] = 0;
+            if (strstr(row, "alice @FL") && strstr(row, "1m")) found = y;
+        }
+        CHECK(found > 0);
+        /* The placeholder avatar frame sits left of the name line. */
+        CHECK(s.cells[found * 80 + 1].ch == 0xDA && s.cells[(found + 5) * 80 + 1].ch == 0xC0);
+        for (x = 0; x < 80; x++) row[x] = (char)s.cells[(found + 1) * 80 + x].ch;
+        CHECK(strstr(row, "hello there") == row + 12);
+        /* Typing goes to the input row; Enter sends. */
+        ui_key(&u, &c, 'h', fake_now, NULL, 0);
+        ui_key(&u, &c, 'i', fake_now, NULL, 0);
+        CHECK(u.inlen == 2);
+        ui_render(&u, &c, &s, fake_now, "online");
+        CHECK(s.cells[23 * 80 + 0].ch == '>' && s.cells[23 * 80 + 2].ch == 'h' && s.cur_x == 4 && s.cur_y == 23);
+        outlen = 0;
+        c.connected = 1;
+        ui_key(&u, &c, KEY_ENTER, fake_now, NULL, 0);
+        CHECK(u.inlen == 0 && strstr(outbox, "\"str\":\"hi\""));
+        /* Compact toggle and scroll clamp. */
+        ui_key(&u, &c, KEY_TOGGLE_COMPACT, fake_now, NULL, 0);
+        CHECK(u.compact == 1);
+        ui_key(&u, &c, KEY_PGUP, fake_now, NULL, 0);
+        ui_render(&u, &c, &s, fake_now, "online");
+        CHECK(u.scroll == 0); /* nothing to scroll into */
+        /* Nick prompt validation. */
+        ui_init(&u);
+        ui_key(&u, &c, 'a', fake_now, NULL, 0);
+        ui_key(&u, &c, '!', fake_now, NULL, 0);
+        CHECK(u.inlen == 1);
+        {
+            char nick[32] = "";
+            ui_key(&u, &c, KEY_ENTER, fake_now, nick, sizeof nick);
+            CHECK(strcmp(nick, "a") == 0 && u.mode == UI_CHAT);
+        }
+    }
+}
+
+static void test_config(void) {
+    app_config cfg;
+    FILE *f = fopen("build-host/test.ini", "w");
+    config_defaults(&cfg);
+    CHECK(strcmp(cfg.host, "futureland.today") == 0 && cfg.port == 10088 && strcmp(cfg.system, "PS3") == 0);
+    if (f) {
+        fputs("; comment\nhost = bbs.example.org\nport=10089\nnick = SiX\n[ui]\ncompact = on\noverscan = 99\nbogus = 1\n", f);
+        fclose(f);
+        CHECK(config_load(&cfg, "build-host/test.ini") == 1);
+        CHECK(strcmp(cfg.host, "bbs.example.org") == 0 && cfg.port == 10089 && strcmp(cfg.nick, "SiX") == 0 && cfg.compact == 1 && cfg.overscan_pct == 15);
+    }
+    CHECK(config_load(&cfg, "build-host/missing.ini") == 0);
+}
+
+int main(void) {
+    test_json();
+    test_framing();
+    test_builders();
+    test_cp437();
+    test_avatar();
+    test_chat();
+    test_ring_wraps();
+    test_wrap_and_render();
+    test_config();
+    printf("%d checks, %d failures\n", checks, fails);
+    return fails ? 1 : 0;
+}
