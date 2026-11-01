@@ -261,8 +261,6 @@ static int g_audio_open, g_src_rate, g_src_ch;
 static u64 g_next_block;        /* the block we fill next */
 static float g_last_l, g_last_r;
 static double g_phase;          /* position in source frames, fractional */
-static short g_pending[2];      /* the last source frame, for interpolation */
-static int g_have_pending;
 
 static volatile u64 *read_index(void) { return (volatile u64 *)(u64)g_cfg.readIndex; }
 
@@ -286,7 +284,7 @@ int plat_audio_open(int rate, int channels) {
     if (audioPortStart(g_port) != 0) { plat_log("audioPortStart failed"); audioPortClose(g_port); return -1; }
     g_src_rate = rate; g_src_ch = channels;
     g_next_block = (*read_index() + 1) % g_cfg.numBlocks;
-    g_phase = 0; g_have_pending = 0; g_last_l = g_last_r = 0;
+    g_phase = 0; g_last_l = g_last_r = 0;
     g_audio_open = 1;
     plat_log("audio port %u: %u blocks, data at 0x%x", (unsigned)g_port, (unsigned)g_cfg.numBlocks, (unsigned)g_cfg.audioDataStart);
     return 0;
