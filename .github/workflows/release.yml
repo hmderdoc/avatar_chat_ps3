@@ -43,7 +43,7 @@ jobs:
           # The ELF and link map turn a crash address from a PS3 or RPCS3
           # log into a function name: tools/symbolize.py
           mkdir -p dist/avatar_chat_ps3/debug
-          cp avatar_chat_ps3.elf avatar_chat_ps3.elf.map tools/symbolize.py dist/avatar_chat_ps3/debug/
+          cp avatar_chat_ps3.elf build/avatar_chat_ps3.elf.map tools/symbolize.py dist/avatar_chat_ps3/debug/
           (cd dist && zip -r "avatar_chat_ps3_${VERSION}.zip" avatar_chat_ps3)
           cp avatar_chat_ps3.pkg "dist/avatar_chat_ps3_${VERSION}.pkg"
           ls -la dist
