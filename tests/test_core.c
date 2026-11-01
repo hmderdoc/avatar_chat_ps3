@@ -14,6 +14,9 @@
 #include "core/inflate.h"
 #include "core/art.h"
 #include "vectors.h"
+#include "vectors_png.h"
+#include "core/png.h"
+#include "core/pics.h"
 
 static int fails, checks;
 #define CHECK(cond) do { checks++; if (!(cond)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -426,6 +429,56 @@ static void test_inflate_and_art(void) {
     }
 }
 
+static void test_png_and_pics(void) {
+    static unsigned char scratch[65536], rgb[4 * 4 * 3];
+    char err[64];
+    int w, h;
+    CHECK(png_size(png_rgb, sizeof png_rgb, &w, &h) && w == 2 && h == 2);
+    CHECK(png_decode(png_rgb, sizeof png_rgb, rgb, 2, 2, scratch, sizeof scratch, err, sizeof err));
+    CHECK(rgb[0] == 255 && rgb[1] == 0 && rgb[2] == 0 && rgb[3] == 0 && rgb[4] == 255 && rgb[5] == 0);
+    CHECK(rgb[6] == 0 && rgb[7] == 0 && rgb[8] == 255 && rgb[9] == 255 && rgb[10] == 255 && rgb[11] == 255);
+    CHECK(png_size(png_pal, sizeof png_pal, &w, &h) && png_decode(png_pal, sizeof png_pal, rgb, 3, 1, scratch, sizeof scratch, err, sizeof err));
+    CHECK(rgb[0] == 10 && rgb[1] == 20 && rgb[2] == 30 && rgb[3] == 0 && rgb[4] == 0 && rgb[5] == 0 && rgb[6] == 70);
+    CHECK(png_size(png_g16, sizeof png_g16, &w, &h) && png_decode(png_g16, sizeof png_g16, rgb, 2, 1, scratch, sizeof scratch, err, sizeof err));
+    CHECK(rgb[0] == 0x80 && rgb[3] == 0xff);
+    CHECK(png_size(png_rgba, sizeof png_rgba, &w, &h) && png_decode(png_rgba, sizeof png_rgba, rgb, 2, 2, scratch, sizeof scratch, err, sizeof err));
+    /* row0: avg filter from nothing -> px0 = (200,100,50,a255); px1 = px0/2 -> (100,50,25,a127) -> composited (49,24,12) */
+    CHECK(rgb[0] == 200 && rgb[1] == 100 && rgb[2] == 50 && rgb[3] == 49 && rgb[4] == 24 && rgb[5] == 12);
+    CHECK(png_size(png_il, sizeof png_il, &w, &h) && png_decode(png_il, sizeof png_il, rgb, 4, 4, scratch, sizeof scratch, err, sizeof err));
+    {
+        int i, ok = 1;
+        for (i = 0; i < 16; i++) if (rgb[i * 3] != i) ok = 0;
+        CHECK(ok);
+    }
+    CHECK(!png_decode(png_rgb, sizeof png_rgb - 20, rgb, 2, 2, scratch, sizeof scratch, err, sizeof err));
+    CHECK(!png_size((const unsigned char *)"GIF89a", 6, &w, &h));
+    /* Links. */
+    {
+        char links[3][PIC_URL];
+        const char *t = "see https://x.org/a/cat.PNG?x=1, and http://y/dog.jpg. not http://z/page.html https://q/w.webp";
+        int n = pics_find_links((const unsigned char *)t, (int)strlen(t), links, 3);
+        CHECK(n == 3 && strcmp(links[0], "https://x.org/a/cat.PNG?x=1") == 0 && strcmp(links[1], "http://y/dog.jpg") == 0 && strcmp(links[2], "https://q/w.webp") == 0);
+        CHECK(!pics_is_image_url("ftp://a/b.png", 13) && pics_is_image_url("http://a/b.jpeg#f", 17));
+    }
+    /* Scaling: a 400x100 image into 40 columns keeps the aspect: 40x10 half-rows = 5 cell rows. */
+    {
+        static pic_cache pc;
+        static unsigned char big[400 * 100 * 3];
+        pic *p;
+        int i;
+        for (i = 0; i < 400 * 100; i++) { big[i * 3] = (unsigned char)(i % 400 < 200 ? 255 : 0); big[i * 3 + 1] = 0; big[i * 3 + 2] = (unsigned char)((i / 400) < 50 ? 255 : 0); }
+        pics_init(&pc);
+        p = pics_get(&pc, "http://h/i.png");
+        CHECK(p && p->state == PIC_QUEUED && pics_next_queued(&pc) == p && pics_find(&pc, "http://h/i.png") == p);
+        pics_set_rgb(p, big, 400, 100, 40);
+        CHECK(p->state == PIC_READY && p->cols == 40 && p->rows == 5);
+        CHECK(p->top[0] == 0xFF00FF && p->bot[4 * 40 + 39] == 0x000000 && p->top[3 * 40 + 0] == 0xFF0000 && p->bot[1 * 40 + 20] == 0x0000FF);
+        /* The cache evicts the least recently used ready entry. */
+        for (i = 0; i < PIC_MAX + 2; i++) { char u[64]; snprintf(u, sizeof u, "http://h/%d.png", i); pics_get(&pc, u); }
+        CHECK(pics_find(&pc, "http://h/i.png") == NULL && pics_find(&pc, "http://h/25.png") != NULL);
+    }
+}
+
 static void test_config(void) {
     app_config cfg;
     FILE *f = fopen("build-host/test.ini", "w");
@@ -450,6 +503,7 @@ int main(void) {
     test_ring_wraps();
     test_wrap_and_render();
     test_inflate_and_art();
+    test_png_and_pics();
     test_config();
     printf("%d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;

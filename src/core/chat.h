@@ -8,6 +8,7 @@
 #include "proto.h"
 #include "avatar.h"
 #include "art.h"
+#include "pics.h"
 
 #define CHAT_RING     200
 #define CHAT_TEXT     1024
@@ -37,6 +38,9 @@ typedef struct {
     unsigned char ncolors;
     char tag[13];
     unsigned int tag_fg, tag_bg;
+    /* Picture links in the text (up to 3), drawn under it once fetched. */
+    char pics[3][PIC_URL];
+    unsigned char npics;
 } chat_msg;
 
 typedef struct {
@@ -97,6 +101,10 @@ typedef struct chat {
     long long last_rx_ms, last_ping_ms;
     int want_quit;
     int toggle_compact;        /* UI hint set by /compact, cleared by the UI */
+
+    /* Pictures linked in messages, fetched by the platform. */
+    pic_cache pics;
+    int show_pics;             /* 0 turns picture fetching off */
 
     /* Art received ([BITMAP|...]), newest last; a ring of CHAT_ARTS. */
     chat_art arts[CHAT_ARTS];

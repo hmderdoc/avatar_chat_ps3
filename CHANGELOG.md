@@ -1,0 +1,59 @@
+# Changelog
+
+Releases are cut from the Actions tab (release > Run workflow with the
+version), which builds the `.pkg` and publishes the matching section of
+this file as the release notes.
+
+## v0.2.0-alpha.1
+
+The second alpha brings most of the door's transcript to the console.
+Still untested on real hardware; it runs in RPCS3.
+
+### Added
+
+- **Pictures in chat.** Image links (`.png .jpg .jpeg .gif .webp .bmp`)
+  are downloaded by the console and drawn under the message as
+  truecolor half-block cells, up to three a message and ten rows tall.
+  PNG and JPEG decode today; GIF and WebP show a note. HTTPS goes
+  through libcurl with PolarSSL; without a `cacert.pem` next to the app
+  certificates are not checked (`ssl_verify`, `images` in the ini).
+- **ANSI art.** `[BITMAP|...]` envelopes from the doors and the web page
+  decode into a full-screen viewer: Square, F3 or `/img` opens the
+  newest unseen piece; Left/Right page, Circle closes.
+- **Handle colours and tags** from `nick.style`, drawn exactly: cells
+  are 24-bit now, with the xterm 256-colour palette behind the CGA set.
+- **Several rooms at once.** `/join` keeps the previous room subscribed;
+  the header lists them with unread counts (highlighted when a line
+  names you); D-pad Left/Right, `/next`, `/prev` switch; `/leave`
+  drops one; `/rooms` lists joined and public rooms.
+- **On-screen keyboard.** Triangle, or Cross on an empty line, opens the
+  system keyboard; Enter sends. At startup it takes the nickname, so a
+  pad is enough to chat.
+- Own messages sit on the right with the avatar at the right edge, as in
+  the door.
+- `tools/symbolize.py` and the `symbolize` workflow turn an RPCS3 crash
+  address into a function; `sdk-probe` runs a command in the toolchain
+  image; release zips carry the ELF and map under `debug/`.
+
+### Fixed
+
+- Crash right after connecting: PSL1GHT's `select()` writes back a
+  128-byte kernel `fd_set` over a 64-byte one. Socket readiness now uses
+  `poll()`.
+
+### Controls
+
+Cross: Enter (empty line: keyboard). Circle: clear line / close.
+Triangle: keyboard. Square: art viewer. Select: compact view. Start:
+quit. D-pad Up/Down and L1/R1: scroll. D-pad Left/Right: switch rooms.
+
+## v0.1.0-alpha.2
+
+- Fixed the crash after entering a nickname (`select()` stack overwrite).
+- The app logs to `/dev_hdd0/tmp/avatar_chat_ps3.log`.
+
+## v0.1.0-alpha.1
+
+- First build: rooms, history, presence, private messages, avatars in a
+  gutter, compact mode, USB keyboard, reconnects. Built in CI with the
+  ps3dev toolchain.

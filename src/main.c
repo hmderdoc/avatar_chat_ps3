@@ -37,6 +37,50 @@ static void on_line(void *ctx, const char *line, size_t n) {
     chat_feed_line(&g_chat, line, n);
 }
 
+/* One picture download at a time, polled from the loop. */
+static pic *g_fetching;
+static long long g_fetch_started;
+#define PIC_MAX_BYTES (5u * 1024u * 1024u)
+#define PIC_TIMEOUT_MS 15000
+
+static void pump_pictures(long long now) {
+    char err[64];
+    if (!g_fetching) {
+        pic *p = pics_next_queued(&g_chat.pics);
+        if (!p) return;
+        if (plat_fetch_start(p->url, PIC_MAX_BYTES, err, sizeof err) != 0) { pics_fail(p, err); g_chat.seq++; return; }
+        p->state = PIC_LOADING;
+        g_fetching = p;
+        g_fetch_started = now;
+        plat_log("picture: fetching %s", p->url);
+        return;
+    }
+    {
+        const unsigned char *data = NULL;
+        size_t n = 0;
+        int rc = plat_fetch_poll(&data, &n, err, sizeof err);
+        if (rc == 0) {
+            if (now - g_fetch_started > PIC_TIMEOUT_MS) { plat_fetch_cancel(); pics_fail(g_fetching, "timed out"); g_fetching = NULL; g_chat.seq++; }
+            return;
+        }
+        if (rc < 0) { pics_fail(g_fetching, err); plat_log("picture: %s", err); }
+        else {
+            unsigned char *rgb = NULL;
+            int w = 0, h = 0;
+            if (plat_decode_image(data, n, &rgb, &w, &h, err, sizeof err)) {
+                pics_set_rgb(g_fetching, rgb, w, h, ui_pic_cols(&g_ui, g_screen.cols > 0 ? g_screen.cols : 80));
+                free(rgb);
+                plat_log("picture: %dx%d -> %dx%d cells", w, h, g_fetching->cols, g_fetching->rows);
+            } else {
+                pics_fail(g_fetching, err);
+                plat_log("picture: decode: %s", err);
+            }
+        }
+        g_fetching = NULL;
+        g_chat.seq++;
+    }
+}
+
 static int load_avatar(const app_config *cfg, unsigned char out[AVATAR_BYTES]) {
     char path[512];
     static unsigned char data[64 * 1024];
@@ -103,6 +147,8 @@ int main(int argc, char **argv) {
     io.now_ms = io_now;
     chat_init(&g_chat, &io);
     g_chat.history_count = cfg.history;
+    g_chat.show_pics = cfg.images;
+    plat_set_ssl_verify(cfg.ssl_verify);
     chat_set_channel(&g_chat, cfg.channel);
     has_avatar = load_avatar(&cfg, avatar);
     chat_set_identity(&g_chat, cfg.nick, cfg.system, has_avatar ? avatar : NULL);
@@ -146,6 +192,7 @@ int main(int argc, char **argv) {
             }
             chat_tick(&g_chat);
         }
+        if (g_chat.show_pics) pump_pictures(now);
 
         nick[0] = 0;
         if (g_ui.osk_open) {

@@ -29,7 +29,12 @@ CFLAGS      = -O2 -Wall -Wextra -Wno-unused-parameter -mcpu=cell $(MACHDEP) $(IN
 CXXFLAGS    = $(CFLAGS)
 LDFLAGS     = $(MACHDEP) -Wl,-Map,$(notdir $@).map
 
-LIBS        := -lrsx -lgcm_sys -lio -lsysutil -lnet -lsysmodule -lrt -llv2 -lm
+# libcurl (with PolarSSL), libjpeg and zlib come from the toolchain's
+# portlibs; polarssl's library sits under its include tree there.
+PORTLIBS    ?= $(PS3DEV)/portlibs/ppu
+LIBDIRS     := $(PORTLIBS)
+LIBS        := -lcurl -lpolarssl -ljpeg -lz -lrsx -lgcm_sys -lio -lsysutil -lnet -lsysmodule -lrt -llv2 -lm
+LDFLAGS     += -L$(PORTLIBS)/include/polarssl/lib
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 

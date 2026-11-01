@@ -195,6 +195,50 @@ static int same_group(const chat_msg *a, const chat_msg *b) {
            b->time - a->time < GROUP_MS && b->time >= a->time;
 }
 
+/* Rows a message's pictures take: a picture's cell rows when it is
+ * ready, else one line of status. */
+static int pic_rows(const chat *c, const chat_msg *m, int width) {
+    int i, rows = 0;
+    for (i = 0; i < m->npics; i++) {
+        const pic *p = pics_find((pic_cache *)&c->pics, m->pics[i]);
+        if (!p) continue;
+        rows += p->state == PIC_READY ? p->rows : 1;
+    }
+    (void)width;
+    return rows;
+}
+
+/* Draw a message's pictures starting at row y, left-aligned at x (or
+ * right-aligned ending at xend when mine); returns the next row. */
+static int draw_pics(const chat *c, screen *s, const chat_msg *m, int x, int xend, int mine, int y, int top, int bottom) {
+    int i, r, cx;
+    for (i = 0; i < m->npics; i++) {
+        pic *p = pics_find((pic_cache *)&c->pics, m->pics[i]);
+        if (!p) continue;
+        if (p->state != PIC_READY) {
+            const char *name = strrchr(m->pics[i], '/');
+            char line[160];
+            name = name ? name + 1 : m->pics[i];
+            if (p->state == PIC_FAILED) snprintf(line, sizeof line, "[picture %.40s: %s]", name, p->why);
+            else snprintf(line, sizeof line, "[loading picture %.40s...]", name);
+            if (y >= top && y <= bottom) {
+                int len = (int)strlen(line), lx = mine ? xend - len : x;
+                if (lx < 0) lx = 0;
+                draw_text(s, lx, y, line, C_META, xend - lx);
+            }
+            y++;
+            continue;
+        }
+        for (r = 0; r < p->rows; r++, y++) {
+            int lx = mine ? xend - p->cols : x;
+            if (y < top || y > bottom) continue;
+            for (cx = 0; cx < p->cols; cx++)
+                put_rgb(s, lx + cx, y, 0xDF, p->top[r * p->cols + cx], p->bot[r * p->cols + cx]);
+        }
+    }
+    return y;
+}
+
 /* Height of a block in the current mode. */
 static int block_height(const ui *u, const chat *c, int first, int last, int cols) {
     ui_seg segs[MAX_SEGS];
@@ -218,6 +262,7 @@ static int block_height(const ui *u, const chat *c, int first, int last, int col
     for (i = first; i <= last; i++) {
         const chat_msg *m = chat_msg_at(c, i);
         lines += ui_wrap(m->text, m->textlen, width, segs, MAX_SEGS);
+        lines += pic_rows(c, m, width);
     }
     if (lines < AVATAR_H) lines = AVATAR_H;
     return lines + 1; /* separator */
@@ -266,6 +311,7 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
                 }
                 raw(s, indent, y, m->text + segs[k].start, segs[k].len, text_attr);
             }
+            y = draw_pics(c, s, m, indent, cols - 1, 0, y, top, bottom);
         }
         return;
     }
@@ -312,6 +358,7 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
                 if (mine) raw(s, gx - 1 - segs[k].len, y, m->text + segs[k].start, segs[k].len, text_attr);
                 else raw(s, GUTTER, y, m->text + segs[k].start, segs[k].len, text_attr);
             }
+            y = draw_pics(c, s, m, mine ? tx : GUTTER, mine ? gx - 1 : cols - 1, mine, y, top, bottom);
         }
     }
 #undef ROW_OK
@@ -345,6 +392,13 @@ static int transcript(ui *u, const chat *c, screen *s, int top, int bottom, long
         y = y0 - 1;
     }
     return total;
+}
+
+/* Columns a picture may use in the current layout. */
+int ui_pic_cols(const ui *u, int cols) {
+    int w = u->compact ? cols - 12 : cols - GUTTER - 1;
+    if (w > PIC_MAX_COLS) w = PIC_MAX_COLS;
+    return w < 8 ? 8 : w;
 }
 
 /* ---- art viewer ------------------------------------------------------ */

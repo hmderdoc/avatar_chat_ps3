@@ -30,6 +30,12 @@
 #include "../../platform.h"
 #include "../../core/cp437.h"
 #include "../../core/font_cp437.h"
+#include "../../core/png.h"
+#include "../../core/pics.h"
+
+#include <curl/curl.h>
+#include <setjmp.h>
+#include <jpeglib.h>
 
 SYS_PROCESS_PARAM(1001, 0x100000)
 
@@ -505,6 +511,202 @@ int net_send_all(int fd, const char *buf, size_t n) {
 }
 
 void net_close(int fd) { close(fd); }
+
+/* ---- pictures: libcurl (PolarSSL for https) and libjpeg from portlibs ---- */
+
+static CURLM *g_multi;
+static CURL *g_easy;
+static unsigned char *g_dl;
+static size_t g_dl_len, g_dl_cap, g_dl_max;
+static int g_dl_active, g_dl_too_big;
+static char g_cacert[300];
+static int g_ssl_verify = 1;
+
+void plat_set_ssl_verify(int on) { g_ssl_verify = on; }
+
+static size_t dl_write(void *ptr, size_t size, size_t nmemb, void *ud) {
+    size_t n = size * nmemb;
+    (void)ud;
+    if (g_dl_len + n > g_dl_max) { g_dl_too_big = 1; return 0; }
+    if (g_dl_len + n > g_dl_cap) {
+        size_t cap = g_dl_cap ? g_dl_cap * 2 : 65536;
+        unsigned char *nb;
+        while (cap < g_dl_len + n) cap *= 2;
+        nb = realloc(g_dl, cap);
+        if (!nb) return 0;
+        g_dl = nb;
+        g_dl_cap = cap;
+    }
+    memcpy(g_dl + g_dl_len, ptr, n);
+    g_dl_len += n;
+    return n;
+}
+
+int plat_fetch_start(const char *url, size_t max_bytes, char *err, size_t errcap) {
+    static int inited;
+    if (!inited) {
+        curl_global_init(CURL_GLOBAL_ALL);
+        snprintf(g_cacert, sizeof g_cacert, "%scacert.pem", g_base);
+        inited = 1;
+    }
+    if (g_dl_active) plat_fetch_cancel();
+    if (!g_multi) g_multi = curl_multi_init();
+    g_easy = curl_easy_init();
+    if (!g_multi || !g_easy) { snprintf(err, errcap, "curl init failed"); return -1; }
+    g_dl_len = 0;
+    g_dl_max = max_bytes;
+    g_dl_too_big = 0;
+    curl_easy_setopt(g_easy, CURLOPT_URL, url);
+    curl_easy_setopt(g_easy, CURLOPT_WRITEFUNCTION, dl_write);
+    curl_easy_setopt(g_easy, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(g_easy, CURLOPT_MAXREDIRS, 3L);
+    curl_easy_setopt(g_easy, CURLOPT_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(g_easy, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(g_easy, CURLOPT_USERAGENT, "avatar_chat_ps3/0.1");
+    curl_easy_setopt(g_easy, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(g_easy, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(g_easy, CURLOPT_MAXFILESIZE, (long)max_bytes);
+    curl_easy_setopt(g_easy, CURLOPT_NOSIGNAL, 1L);
+    {
+        FILE *f = fopen(g_cacert, "rb");
+        if (f && g_ssl_verify) { fclose(f); curl_easy_setopt(g_easy, CURLOPT_CAINFO, g_cacert); }
+        else {
+            /* The console's own certificate store is old and the toolchain's
+             * curl points at a path that doesn't exist here, so without a
+             * cacert.pem next to the app, pictures are fetched unverified. */
+            if (f) fclose(f);
+            curl_easy_setopt(g_easy, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(g_easy, CURLOPT_SSL_VERIFYHOST, 0L);
+        }
+    }
+    if (curl_multi_add_handle(g_multi, g_easy) != CURLM_OK) { snprintf(err, errcap, "curl add failed"); curl_easy_cleanup(g_easy); g_easy = NULL; return -1; }
+    g_dl_active = 1;
+    return 0;
+}
+
+void plat_fetch_cancel(void) {
+    if (g_easy) {
+        if (g_multi) curl_multi_remove_handle(g_multi, g_easy);
+        curl_easy_cleanup(g_easy);
+        g_easy = NULL;
+    }
+    g_dl_active = 0;
+}
+
+int plat_fetch_poll(const unsigned char **data, size_t *n, char *err, size_t errcap) {
+    int running = 0, msgs = 0;
+    CURLMsg *m;
+    if (!g_dl_active) { snprintf(err, errcap, "no download"); return -1; }
+    curl_multi_perform(g_multi, &running);
+    while ((m = curl_multi_info_read(g_multi, &msgs)) != NULL) {
+        if (m->msg != CURLMSG_DONE) continue;
+        {
+            CURLcode rc = m->data.result;
+            long status = 0;
+            curl_easy_getinfo(g_easy, CURLINFO_RESPONSE_CODE, &status);
+            plat_fetch_cancel();
+            if (g_dl_too_big) { snprintf(err, errcap, "too large"); return -1; }
+            if (rc != CURLE_OK) { snprintf(err, errcap, "%s", curl_easy_strerror(rc)); return -1; }
+            if (status != 200) { snprintf(err, errcap, "HTTP %ld", status); return -1; }
+            *data = g_dl;
+            *n = g_dl_len;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* A memory source for libjpeg (jpeg_mem_src only exists from libjpeg 8). */
+typedef struct { struct jpeg_source_mgr pub; const unsigned char *data; size_t n; } mem_src;
+static void msrc_init(j_decompress_ptr c) { (void)c; }
+static boolean msrc_fill(j_decompress_ptr c) {
+    static const unsigned char eoi[2] = { 0xFF, 0xD9 };
+    mem_src *m = (mem_src *)c->src;
+    m->pub.next_input_byte = eoi; /* a truncated file: pretend it ended */
+    m->pub.bytes_in_buffer = 2;
+    return TRUE;
+}
+static void msrc_skip(j_decompress_ptr c, long n) {
+    mem_src *m = (mem_src *)c->src;
+    if (n <= 0) return;
+    if ((size_t)n > m->pub.bytes_in_buffer) n = (long)m->pub.bytes_in_buffer;
+    m->pub.next_input_byte += n;
+    m->pub.bytes_in_buffer -= (size_t)n;
+}
+static void msrc_term(j_decompress_ptr c) { (void)c; }
+static void jpeg_memory_src(j_decompress_ptr c, mem_src *m, const unsigned char *data, size_t n) {
+    m->pub.init_source = msrc_init;
+    m->pub.fill_input_buffer = msrc_fill;
+    m->pub.skip_input_data = msrc_skip;
+    m->pub.resync_to_restart = jpeg_resync_to_restart;
+    m->pub.term_source = msrc_term;
+    m->pub.next_input_byte = data;
+    m->pub.bytes_in_buffer = n;
+    m->data = data;
+    m->n = n;
+    c->src = &m->pub;
+}
+
+/* libjpeg with an error handler that returns instead of exiting. */
+struct jpg_err { struct jpeg_error_mgr pub; jmp_buf jump; };
+static void jpg_error_exit(j_common_ptr cinfo) { longjmp(((struct jpg_err *)cinfo->err)->jump, 1); }
+static void jpg_quiet(j_common_ptr cinfo) { (void)cinfo; }
+
+static int decode_jpeg(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap) {
+    struct jpeg_decompress_struct cinfo;
+    struct jpg_err jerr;
+    mem_src src;
+    unsigned char *out = NULL;
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = jpg_error_exit;
+    jerr.pub.output_message = jpg_quiet;
+    if (setjmp(jerr.jump)) {
+        jpeg_destroy_decompress(&cinfo);
+        free(out);
+        snprintf(err, errcap, "bad JPEG");
+        return 0;
+    }
+    jpeg_create_decompress(&cinfo);
+    jpeg_memory_src(&cinfo, &src, data, n);
+    jpeg_read_header(&cinfo, TRUE);
+    cinfo.out_color_space = JCS_RGB;
+    /* Decode big pictures at reduced size: they end up a few cells wide. */
+    cinfo.scale_num = 1;
+    cinfo.scale_denom = 1;
+    while (cinfo.scale_denom < 8 && (cinfo.image_width / cinfo.scale_denom) > 1024) cinfo.scale_denom *= 2;
+    jpeg_start_decompress(&cinfo);
+    *w = (int)cinfo.output_width;
+    *h = (int)cinfo.output_height;
+    if ((long long)*w * *h > 16000000LL) { jpeg_destroy_decompress(&cinfo); snprintf(err, errcap, "image too large"); return 0; }
+    out = malloc((size_t)*w * *h * 3);
+    if (!out) { jpeg_destroy_decompress(&cinfo); snprintf(err, errcap, "no memory"); return 0; }
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned char *row = out + (size_t)cinfo.output_scanline * *w * 3;
+        jpeg_read_scanlines(&cinfo, &row, 1);
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    *rgb = out;
+    return 1;
+}
+
+int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap) {
+    if (png_size(data, n, w, h)) {
+        size_t sn;
+        unsigned char *scratch;
+        if ((long long)*w * *h > 16000000LL) { snprintf(err, errcap, "image too large"); return 0; }
+        sn = png_scratch(*w, *h);
+        scratch = malloc(sn);
+        *rgb = malloc((size_t)*w * *h * 3);
+        if (!scratch || !*rgb) { free(scratch); free(*rgb); *rgb = NULL; snprintf(err, errcap, "no memory"); return 0; }
+        if (!png_decode(data, n, *rgb, *w, *h, scratch, sn, err, errcap)) { free(scratch); free(*rgb); *rgb = NULL; return 0; }
+        free(scratch);
+        return 1;
+    }
+    if (n > 3 && data[0] == 0xFF && data[1] == 0xD8) return decode_jpeg(data, n, rgb, w, h, err, errcap);
+    snprintf(err, errcap, n > 6 && memcmp(data, "GIF8", 4) == 0 ? "GIF not supported yet" : n > 12 && memcmp(data + 8, "WEBP", 4) == 0 ? "WebP not supported yet" : "not a picture");
+    return 0;
+}
 
 void plat_log(const char *fmt, ...) {
     va_list ap;

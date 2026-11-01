@@ -56,6 +56,20 @@ int net_recv(int fd, char *buf, size_t cap);
 int net_send_all(int fd, const char *buf, size_t n);
 void net_close(int fd);
 
+/* Downloads for pictures: one at a time. plat_fetch_start begins a GET of
+ * url with a byte cap; -1 when the platform can't (no HTTPS support, bad
+ * URL), with err set. plat_fetch_poll returns 0 while in progress, 1 done
+ * (data/n valid until the next start), -1 failed (err set). */
+int plat_fetch_start(const char *url, size_t max_bytes, char *err, size_t errcap);
+int plat_fetch_poll(const unsigned char **data, size_t *n, char *err, size_t errcap);
+void plat_fetch_cancel(void);
+/* Whether HTTPS certificates are checked (needs cacert.pem next to the app). */
+void plat_set_ssl_verify(int on);
+
+/* Decode an image file (PNG, JPEG, ... as the platform supports) into a
+ * malloc'd packed RGB buffer; 1 on success. The caller frees *rgb. */
+int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap);
+
 void plat_log(const char *fmt, ...);
 
 #endif

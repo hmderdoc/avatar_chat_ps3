@@ -41,9 +41,19 @@ void chat_init(chat *c, const chat_io *io) {
     c->io = *io;
     c->history_count = 40;
     c->want_art = -1;
+    c->show_pics = 1;
+    pics_init(&c->pics);
     strcpy(c->channel, "main");
     strcpy(c->joined[0], "main");
     c->njoined = 1;
+}
+
+/* Picture links in a message: remember them and queue the fetches. */
+static void take_pics(chat *c, chat_msg *m, const char *utf8) {
+    int i;
+    if (!c->show_pics) return;
+    m->npics = (unsigned char)pics_find_links((const unsigned char *)utf8, (int)strlen(utf8), m->pics, 3);
+    for (i = 0; i < m->npics; i++) pics_get(&c->pics, m->pics[i]);
 }
 
 static int room_index(const chat *c, const char *name) {
@@ -358,6 +368,7 @@ static void send_text_to(chat *c, const char *dest, const char *utf8, int is_pm,
         m->textlen = (int)cp437_from_utf8(tmp, strlen(tmp), m->text, sizeof m->text);
     } else {
         m->textlen = (int)cp437_from_utf8(utf8, strlen(utf8), m->text, sizeof m->text);
+        take_pics(c, m, utf8);
     }
 }
 
@@ -581,6 +592,7 @@ static void take_message(chat *c, const json_val *msg, int private_box, int live
     m->textlen = (int)cp437_from_utf8(str, strlen(str), m->text, sizeof m->text);
     if (*avatar && avatar_from_base64(avatar, strlen(avatar), m->avatar)) m->has_avatar = 1;
     take_style(m, json_get(nick, "style"));
+    take_pics(c, m, str);
     if (private_box && !self) snprintf(c->last_pm_from, sizeof c->last_pm_from, "%s", name);
 }
 

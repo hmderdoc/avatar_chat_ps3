@@ -12,6 +12,8 @@ typedef struct {
     int avatar_index;
     int history;
     int compact;
+    int images;      /* fetch and show picture links */
+    int ssl_verify;  /* check HTTPS certificates (needs cacert.pem) */
     int overscan_pct;
     int scale;
 } app_config;

@@ -13,6 +13,8 @@ void config_defaults(app_config *c) {
     strcpy(c->avatar_file, "avatar.bin");
     c->history = 40;
     c->overscan_pct = 5;
+    c->images = 1;
+    c->ssl_verify = 1;
 }
 
 static char *trim(char *s) {
@@ -49,6 +51,8 @@ int config_load(app_config *c, const char *path) {
         else if (!strcasecmp(k, "avatar_index")) c->avatar_index = atoi(v);
         else if (!strcasecmp(k, "history")) c->history = atoi(v);
         else if (!strcasecmp(k, "compact")) c->compact = on_off(v);
+        else if (!strcasecmp(k, "images")) c->images = on_off(v);
+        else if (!strcasecmp(k, "ssl_verify")) c->ssl_verify = on_off(v);
         else if (!strcasecmp(k, "overscan")) c->overscan_pct = atoi(v);
         else if (!strcasecmp(k, "scale")) c->scale = atoi(v);
     }

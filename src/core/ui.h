@@ -77,6 +77,9 @@ int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nic
  * a short connection state label, e.g. "online" or "connecting". */
 void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *conn);
 
+/* Columns a picture may use in the current layout. */
+int ui_pic_cols(const ui *u, int cols);
+
 /* Word-wrap CP437 text to width: fills up to max segments with (start,len).
  * Returns the segment count (at least 1 for empty text). Shared with tests. */
 typedef struct { int start, len; } ui_seg;

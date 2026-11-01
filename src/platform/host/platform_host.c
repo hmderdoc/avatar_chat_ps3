@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "../../platform.h"
 #include "../../core/cp437.h"
+#include "../../core/png.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include "../../core/pics.h"
 
 static struct termios g_saved;
 static int g_raw;
@@ -300,6 +302,181 @@ int net_send_all(int fd, const char *buf, size_t n) {
 }
 
 void net_close(int fd) { close(fd); }
+
+/* ---- pictures: a small HTTP/1.1 client, plain http only on the host ------ */
+
+static struct {
+    int fd;
+    int active;
+    unsigned char *buf;
+    size_t len, cap, max;
+    int header_done;
+    size_t body_off;
+    long content_len;    /* -1 unknown */
+    int chunked;
+    int redirects;
+    char url[PIC_URL];
+} g_fetch;
+
+static int parse_url(const char *url, char *host, size_t hcap, int *port, char *path, size_t pcap) {
+    const char *p, *slash, *colon;
+    size_t hl;
+    if (strncasecmp(url, "http://", 7) != 0) return -1;
+    p = url + 7;
+    slash = strchr(p, '/');
+    hl = slash ? (size_t)(slash - p) : strlen(p);
+    if (hl == 0 || hl >= hcap) return -1;
+    memcpy(host, p, hl);
+    host[hl] = 0;
+    *port = 80;
+    colon = strchr(host, ':');
+    if (colon) { *port = atoi(colon + 1); host[colon - host] = 0; }
+    snprintf(path, pcap, "%s", slash ? slash : "/");
+    return 0;
+}
+
+static int fetch_begin(const char *url, char *err, size_t errcap) {
+    char host[256], path[1024], req[1600];
+    int port;
+    if (parse_url(url, host, sizeof host, &port, path, sizeof path) != 0) { snprintf(err, errcap, "only http:// here"); return -1; }
+    g_fetch.fd = net_connect(host, port, err, errcap);
+    if (g_fetch.fd < 0) return -1;
+    snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: avatar_chat_ps3/0.1\r\nAccept: image/*\r\nConnection: close\r\n\r\n", path, host);
+    if (net_send_all(g_fetch.fd, req, strlen(req)) != 0) { net_close(g_fetch.fd); g_fetch.fd = -1; snprintf(err, errcap, "send failed"); return -1; }
+    g_fetch.len = 0;
+    g_fetch.header_done = 0;
+    g_fetch.content_len = -1;
+    g_fetch.chunked = 0;
+    snprintf(g_fetch.url, sizeof g_fetch.url, "%s", url);
+    return 0;
+}
+
+int plat_fetch_start(const char *url, size_t max_bytes, char *err, size_t errcap) {
+    if (g_fetch.active) plat_fetch_cancel();
+    if (!g_fetch.buf || g_fetch.cap < max_bytes + 65536) {
+        free(g_fetch.buf);
+        g_fetch.cap = max_bytes + 65536;
+        g_fetch.buf = malloc(g_fetch.cap);
+        if (!g_fetch.buf) { snprintf(err, errcap, "no memory"); return -1; }
+    }
+    g_fetch.max = max_bytes;
+    g_fetch.redirects = 0;
+    if (fetch_begin(url, err, errcap) != 0) return -1;
+    g_fetch.active = 1;
+    return 0;
+}
+
+void plat_fetch_cancel(void) {
+    if (g_fetch.fd >= 0) net_close(g_fetch.fd);
+    g_fetch.fd = -1;
+    g_fetch.active = 0;
+}
+
+/* Undo chunked transfer coding in place; returns the body length or -1. */
+static long dechunk(unsigned char *b, size_t n) {
+    size_t r = 0, w = 0;
+    while (r < n) {
+        char *end;
+        unsigned long len = strtoul((char *)b + r, &end, 16);
+        unsigned char *nl = memchr(b + r, '\n', n - r);
+        if (!nl) return -1;
+        r = (size_t)(nl - b) + 1;
+        if (len == 0) return (long)w;
+        if (r + len > n) return -1;
+        memmove(b + w, b + r, len);
+        w += len;
+        r += len;
+        while (r < n && (b[r] == '\r' || b[r] == '\n')) r++;
+        (void)end;
+    }
+    return -1;
+}
+
+static int fetch_finish(const unsigned char **data, size_t *n, char *err, size_t errcap) {
+    char *hdr = (char *)g_fetch.buf;
+    int status;
+    char *line_end = strstr(hdr, "\r\n");
+    plat_fetch_cancel();
+    if (!g_fetch.header_done || !line_end) { snprintf(err, errcap, "bad reply"); return -1; }
+    status = atoi(hdr + 9);
+    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        char *loc = strcasestr(hdr, "\nLocation:");
+        if (loc && g_fetch.redirects < 3) {
+            char next[PIC_URL];
+            size_t k = 0;
+            loc += 10;
+            while (*loc == ' ') loc++;
+            while (*loc && *loc != '\r' && *loc != '\n' && k + 1 < sizeof next) next[k++] = *loc++;
+            next[k] = 0;
+            g_fetch.redirects++;
+            if (fetch_begin(next, err, errcap) != 0) return -1;
+            g_fetch.active = 1;
+            return 0;
+        }
+        snprintf(err, errcap, "too many redirects");
+        return -1;
+    }
+    if (status != 200) { snprintf(err, errcap, "HTTP %d", status); return -1; }
+    {
+        unsigned char *body = g_fetch.buf + g_fetch.body_off;
+        size_t blen = g_fetch.len - g_fetch.body_off;
+        if (g_fetch.chunked) {
+            long l = dechunk(body, blen);
+            if (l < 0) { snprintf(err, errcap, "bad chunking"); return -1; }
+            blen = (size_t)l;
+        }
+        *data = body;
+        *n = blen;
+    }
+    return 1;
+}
+
+int plat_fetch_poll(const unsigned char **data, size_t *n, char *err, size_t errcap) {
+    int got;
+    if (!g_fetch.active) { snprintf(err, errcap, "no download"); return -1; }
+    got = net_recv(g_fetch.fd, (char *)g_fetch.buf + g_fetch.len, g_fetch.cap - g_fetch.len - 1);
+    if (got > 0) {
+        g_fetch.len += (size_t)got;
+        g_fetch.buf[g_fetch.len] = 0;
+        if (!g_fetch.header_done) {
+            char *end = strstr((char *)g_fetch.buf, "\r\n\r\n");
+            if (end) {
+                char *cl, *te;
+                *end = 0;
+                g_fetch.header_done = 1;
+                g_fetch.body_off = (size_t)(end + 4 - (char *)g_fetch.buf);
+                cl = strcasestr((char *)g_fetch.buf, "\nContent-Length:");
+                if (cl) g_fetch.content_len = atol(cl + 16);
+                te = strcasestr((char *)g_fetch.buf, "\nTransfer-Encoding:");
+                if (te && strcasestr(te, "chunked")) g_fetch.chunked = 1;
+                if (g_fetch.content_len > (long)g_fetch.max) { plat_fetch_cancel(); snprintf(err, errcap, "too large"); return -1; }
+            }
+        }
+        if (g_fetch.len - g_fetch.body_off > g_fetch.max) { plat_fetch_cancel(); snprintf(err, errcap, "too large"); return -1; }
+        if (g_fetch.header_done && g_fetch.content_len >= 0 && (long)(g_fetch.len - g_fetch.body_off) >= g_fetch.content_len)
+            return fetch_finish(data, n, err, errcap);
+        return 0;
+    }
+    if (got == 0) return 0;
+    /* Closed: the reply is complete (Connection: close). */
+    return fetch_finish(data, n, err, errcap);
+}
+
+void plat_set_ssl_verify(int on) { (void)on; }
+
+int plat_decode_image(const unsigned char *data, size_t n, unsigned char **rgb, int *w, int *h, char *err, size_t errcap) {
+    unsigned char *scratch;
+    size_t sn;
+    if (!png_size(data, n, w, h)) { snprintf(err, errcap, "only PNG on the host build"); return 0; }
+    if ((long long)*w * *h > 16000000LL) { snprintf(err, errcap, "image too large"); return 0; }
+    sn = png_scratch(*w, *h);
+    scratch = malloc(sn);
+    *rgb = malloc((size_t)*w * *h * 3);
+    if (!scratch || !*rgb) { free(scratch); free(*rgb); *rgb = NULL; snprintf(err, errcap, "no memory"); return 0; }
+    if (!png_decode(data, n, *rgb, *w, *h, scratch, sn, err, errcap)) { free(scratch); free(*rgb); *rgb = NULL; return 0; }
+    free(scratch);
+    return 1;
+}
 
 void plat_log(const char *fmt, ...) {
     va_list ap;
