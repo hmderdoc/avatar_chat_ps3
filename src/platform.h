@@ -49,12 +49,12 @@ long long plat_now_ms(void);
 void plat_sleep_ms(int ms);
 
 /* Networking. net_connect returns a socket or -1 (err gets a message). */
-int net_connect(const char *host, int port, char *err, size_t errcap);
+int plat_net_connect(const char *host, int port, char *err, size_t errcap);
 /* >0 bytes read, 0 nothing available, -1 closed or failed. */
-int net_recv(int fd, char *buf, size_t cap);
+int plat_net_recv(int fd, char *buf, size_t cap);
 /* 0 on success, -1 on failure. Blocks until all is written. */
-int net_send_all(int fd, const char *buf, size_t n);
-void net_close(int fd);
+int plat_net_send_all(int fd, const char *buf, size_t n);
+void plat_net_close(int fd);
 
 /* Downloads for pictures: one at a time. plat_fetch_start begins a GET of
  * url with a byte cap; -1 when the platform can't (no HTTPS support, bad

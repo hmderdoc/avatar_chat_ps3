@@ -23,8 +23,8 @@ static char g_conn[32] = "offline";
 static void io_send(void *ctx, const char *bytes, size_t n) {
     (void)ctx;
     if (g_sock < 0) return;
-    if (net_send_all(g_sock, bytes, n) < 0) {
-        net_close(g_sock);
+    if (plat_net_send_all(g_sock, bytes, n) < 0) {
+        plat_net_close(g_sock);
         g_sock = -1;
         chat_disconnected(&g_chat, "send failed");
     }
@@ -104,7 +104,7 @@ static void try_connect(app_config *cfg) {
     plat_screen_size(&g_screen.cols, &g_screen.rows);
     ui_render(&g_ui, &g_chat, &g_screen, plat_now_ms(), g_conn);
     plat_present(&g_screen);
-    g_sock = net_connect(cfg->host, cfg->port, err, sizeof err);
+    g_sock = plat_net_connect(cfg->host, cfg->port, err, sizeof err);
     if (g_sock < 0) {
         long long wait = 5000LL * (g_retry < 6 ? (1 << g_retry) : 64);
         if (wait > 120000) wait = 120000;
@@ -178,9 +178,9 @@ int main(int argc, char **argv) {
             char buf[4096];
             int got;
             int budget = 32;
-            while (budget-- > 0 && (got = net_recv(g_sock, buf, sizeof buf)) != 0) {
+            while (budget-- > 0 && (got = plat_net_recv(g_sock, buf, sizeof buf)) != 0) {
                 if (got < 0) {
-                    net_close(g_sock);
+                    plat_net_close(g_sock);
                     g_sock = -1;
                     chat_disconnected(&g_chat, "connection lost");
                     g_next_connect = now + 3000;
@@ -232,7 +232,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (g_sock >= 0) net_close(g_sock);
+    if (g_sock >= 0) plat_net_close(g_sock);
     plat_shutdown();
     return 0;
 }

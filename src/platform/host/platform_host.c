@@ -247,7 +247,7 @@ void plat_sleep_ms(int ms) {
 
 /* ---- sockets ----------------------------------------------------------- */
 
-int net_connect(const char *host, int port, char *err, size_t errcap) {
+int plat_net_connect(const char *host, int port, char *err, size_t errcap) {
     struct addrinfo hints, *res = NULL, *ai;
     char portstr[16];
     int fd = -1, rc;
@@ -277,7 +277,7 @@ int net_connect(const char *host, int port, char *err, size_t errcap) {
     return fd;
 }
 
-int net_recv(int fd, char *buf, size_t cap) {
+int plat_net_recv(int fd, char *buf, size_t cap) {
     fd_set r;
     struct timeval tv;
     ssize_t got;
@@ -291,7 +291,7 @@ int net_recv(int fd, char *buf, size_t cap) {
     return (int)got;
 }
 
-int net_send_all(int fd, const char *buf, size_t n) {
+int plat_net_send_all(int fd, const char *buf, size_t n) {
     while (n > 0) {
         ssize_t w = send(fd, buf, n, 0);
         if (w < 0) { if (errno == EINTR) continue; return -1; }
@@ -301,7 +301,7 @@ int net_send_all(int fd, const char *buf, size_t n) {
     return 0;
 }
 
-void net_close(int fd) { close(fd); }
+void plat_net_close(int fd) { close(fd); }
 
 /* ---- pictures: a small HTTP/1.1 client, plain http only on the host ------ */
 
@@ -339,10 +339,10 @@ static int fetch_begin(const char *url, char *err, size_t errcap) {
     char host[256], path[1024], req[1600];
     int port;
     if (parse_url(url, host, sizeof host, &port, path, sizeof path) != 0) { snprintf(err, errcap, "only http:// here"); return -1; }
-    g_fetch.fd = net_connect(host, port, err, errcap);
+    g_fetch.fd = plat_net_connect(host, port, err, errcap);
     if (g_fetch.fd < 0) return -1;
     snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: avatar_chat_ps3/0.1\r\nAccept: image/*\r\nConnection: close\r\n\r\n", path, host);
-    if (net_send_all(g_fetch.fd, req, strlen(req)) != 0) { net_close(g_fetch.fd); g_fetch.fd = -1; snprintf(err, errcap, "send failed"); return -1; }
+    if (plat_net_send_all(g_fetch.fd, req, strlen(req)) != 0) { plat_net_close(g_fetch.fd); g_fetch.fd = -1; snprintf(err, errcap, "send failed"); return -1; }
     g_fetch.len = 0;
     g_fetch.header_done = 0;
     g_fetch.content_len = -1;
@@ -367,7 +367,7 @@ int plat_fetch_start(const char *url, size_t max_bytes, char *err, size_t errcap
 }
 
 void plat_fetch_cancel(void) {
-    if (g_fetch.fd >= 0) net_close(g_fetch.fd);
+    if (g_fetch.fd >= 0) plat_net_close(g_fetch.fd);
     g_fetch.fd = -1;
     g_fetch.active = 0;
 }
@@ -434,7 +434,7 @@ static int fetch_finish(const unsigned char **data, size_t *n, char *err, size_t
 int plat_fetch_poll(const unsigned char **data, size_t *n, char *err, size_t errcap) {
     int got;
     if (!g_fetch.active) { snprintf(err, errcap, "no download"); return -1; }
-    got = net_recv(g_fetch.fd, (char *)g_fetch.buf + g_fetch.len, g_fetch.cap - g_fetch.len - 1);
+    got = plat_net_recv(g_fetch.fd, (char *)g_fetch.buf + g_fetch.len, g_fetch.cap - g_fetch.len - 1);
     if (got > 0) {
         g_fetch.len += (size_t)got;
         g_fetch.buf[g_fetch.len] = 0;

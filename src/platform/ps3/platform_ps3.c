@@ -449,7 +449,7 @@ void plat_sleep_ms(int ms) { usleep((useconds_t)ms * 1000); }
 
 /* ---- sockets ------------------------------------------------------------- */
 
-int net_connect(const char *host, int port, char *err, size_t errcap) {
+int plat_net_connect(const char *host, int port, char *err, size_t errcap) {
     struct sockaddr_in sa;
     int fd;
     memset(&sa, 0, sizeof sa);
@@ -480,7 +480,7 @@ int net_connect(const char *host, int port, char *err, size_t errcap) {
  * sys_net_fd_set, and a smaller C-library fd_set on the stack gets
  * overwritten when the kernel writes the result back. pollfd is the same
  * 8 bytes everywhere. */
-int net_recv(int fd, char *buf, size_t cap) {
+int plat_net_recv(int fd, char *buf, size_t cap) {
     struct pollfd p;
     int rc, got;
     p.fd = fd;
@@ -499,7 +499,7 @@ int net_recv(int fd, char *buf, size_t cap) {
     return got;
 }
 
-int net_send_all(int fd, const char *buf, size_t n) {
+int plat_net_send_all(int fd, const char *buf, size_t n) {
     while (n > 0) {
         int w = send(fd, buf, n, 0);
         if (w < 0) { plat_log("send(%d, %u bytes) failed: %d errno %d", fd, (unsigned)n, w, errno); return -1; }
@@ -510,7 +510,7 @@ int net_send_all(int fd, const char *buf, size_t n) {
     return 0;
 }
 
-void net_close(int fd) { close(fd); }
+void plat_net_close(int fd) { close(fd); }
 
 /* ---- pictures: libcurl (PolarSSL for https) and libjpeg from portlibs ---- */
 
