@@ -40,3 +40,4 @@ jobs:
             dist/avatar_chat_ps3_*.pkg
             dist/avatar_chat_ps3_*.zip
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -16,9 +16,9 @@ not one, so this is a from-scratch client that speaks the same protocol
 **Status: alpha, not yet run on a real PS3.** The portable core (protocol,
 layout, avatars) is unit-tested and has been run end to end against
 `avatar_chat_server` through the host build. The PSL1GHT platform layer
-(`src/platform/ps3`) compiles against a header shim but has not been
-built with the real toolchain or booted on hardware. Issue reports from a
-console are the next step; see [Testing on a PS3](#testing-on-a-ps3).
+(`src/platform/ps3`) builds cleanly with the real toolchain in CI, which
+produces the `.pkg`, but nobody has booted it on hardware yet. Reports
+from a console are the next step; see [Testing on a PS3](#testing-on-a-ps3).
 
 ## What it does
 
@@ -113,9 +113,8 @@ On the host, Ctrl-L toggles compact view and Ctrl-C quits.
 
 ## Testing on a PS3
 
-The PSL1GHT layer is written from the SDK's public headers and samples
-but is unverified. Things most likely to need a fix on first boot, in
-order:
+The PSL1GHT layer compiles, but is untested on hardware. Things most
+likely to need a fix on first boot, in order:
 
 1. **Video:** `init_video` in `src/platform/ps3/platform_ps3.c` follows the
    PSL1GHT `rsxutil` sample (XRGB buffers, `gcmSetFlip` / `gcmSetWaitFlip`).
