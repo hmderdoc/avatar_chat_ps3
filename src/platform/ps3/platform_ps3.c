@@ -22,6 +22,8 @@
 #include <rsx/rsx.h>
 #include <sysutil/video.h>
 #include <sysutil/sysutil.h>
+#include <sysutil/osk.h>
+#include <sys/memory.h>
 #include <io/pad.h>
 #include <io/kb.h>
 
@@ -64,10 +66,101 @@ void plat_set_argv0(const char *argv0) {
     g_base[n] = 0;
 }
 
+/* ---- on-screen keyboard ------------------------------------------------ */
+
+#define OSK_MAX 1000
+static sys_mem_container_t g_osk_container;
+static int g_osk_have_container;
+static u16 g_osk_title[64], g_osk_start[OSK_MAX + 1], g_osk_result[OSK_MAX + 1];
+static int g_osk_active;       /* dialog up */
+static int g_osk_outcome;      /* 0 none yet, 1 text in g_osk_result, -1 cancelled */
+static int g_osk_len;
+
+static void osk_finished(void) {
+    oskCallbackReturnParam ret;
+    memset(&ret, 0, sizeof ret);
+    ret.res = OSK_OK;
+    ret.len = OSK_MAX;
+    ret.str = g_osk_result;
+    memset(g_osk_result, 0, sizeof g_osk_result);
+    if (oskUnloadAsync(&ret) != 0) { g_osk_outcome = -1; plat_log("oskUnloadAsync failed"); return; }
+    if (ret.res == OSK_OK && ret.len > 0) { g_osk_len = ret.len > OSK_MAX ? OSK_MAX : ret.len; g_osk_outcome = 1; }
+    else if (ret.res == OSK_NO_TEXT) { g_osk_len = 0; g_osk_outcome = 1; }
+    else g_osk_outcome = -1;
+    plat_log("osk result res=%u len=%d", (unsigned)ret.res, (int)ret.len);
+}
+
 static void sysutil_cb(u64 status, u64 param, void *userdata) {
     (void)param; (void)userdata;
-    if (status == SYSUTIL_EXIT_GAME) g_quit = 1;
+    switch (status) {
+    case SYSUTIL_EXIT_GAME: g_quit = 1; break;
+    case SYSUTIL_OSK_LOADED: plat_log("osk loaded"); break;
+    case SYSUTIL_OSK_DONE: osk_finished(); break;
+    case SYSUTIL_OSK_INPUT_CANCELED: plat_log("osk cancelled"); break;
+    case SYSUTIL_OSK_UNLOADED: g_osk_active = 0; plat_log("osk unloaded"); break;
+    default: break;
+    }
 }
+
+static void to_utf16(u16 *out, size_t cap, const unsigned char *cp437, int n, const char *ascii) {
+    size_t o = 0;
+    int i;
+    if (ascii) for (i = 0; ascii[i] && o + 1 < cap; i++) out[o++] = (u16)(unsigned char)ascii[i];
+    else for (i = 0; i < n && o + 1 < cap; i++) out[o++] = (u16)cp437_to_unicode[cp437[i]];
+    out[o] = 0;
+}
+
+int plat_osk_open(const char *title, const unsigned char *text, int n) {
+    oskParam param;
+    oskInputFieldInfo info;
+    s32 rc;
+    if (g_osk_active) return 0;
+    if (!g_osk_have_container) {
+        if (sysMemContainerCreate(&g_osk_container, 7 * 1024 * 1024) != 0) { plat_log("osk: no memory container"); return -1; }
+        g_osk_have_container = 1;
+    }
+    to_utf16(g_osk_title, sizeof g_osk_title / sizeof g_osk_title[0], NULL, 0, title);
+    to_utf16(g_osk_start, sizeof g_osk_start / sizeof g_osk_start[0], text, n, NULL);
+    memset(&param, 0, sizeof param);
+    param.allowedPanels = OSK_PANEL_TYPE_DEFAULT;
+    param.firstViewPanel = OSK_PANEL_TYPE_DEFAULT;
+    param.controlPoint.x = 0;
+    param.controlPoint.y = 0;
+    param.prohibitFlags = OSK_PROHIBIT_RETURN;
+    memset(&info, 0, sizeof info);
+    info.message = g_osk_title;
+    info.startText = g_osk_start;
+    info.maxLength = OSK_MAX;
+    oskSetInitialInputDevice(OSK_DEVICE_PAD);
+    oskSetKeyLayoutOption(OSK_10KEY_PANEL | OSK_FULLKEY_PANEL);
+    oskSetLayoutMode(OSK_LAYOUTMODE_HORIZONTAL_ALIGN_CENTER | OSK_LAYOUTMODE_VERTICAL_ALIGN_BOTTOM);
+    g_osk_outcome = 0;
+    g_osk_len = 0;
+    rc = oskLoadAsync(g_osk_container, &param, &info);
+    if (rc != 0) { plat_log("oskLoadAsync failed: %d", (int)rc); return -1; }
+    g_osk_active = 1;
+    return 0;
+}
+
+int plat_osk_poll(unsigned char *out, int cap, int *n) {
+    int i, o = 0;
+    *n = 0;
+    sysUtilCheckCallback();
+    if (g_osk_outcome == 0) return g_osk_active ? 0 : -1;
+    if (g_osk_outcome < 0) { g_osk_outcome = 0; return -1; }
+    for (i = 0; i < g_osk_len && o < cap; i++) {
+        unsigned long cp = g_osk_result[i];
+        unsigned char b;
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < g_osk_len) { cp = 0x10000 + ((cp - 0xD800) << 10) + (g_osk_result[i + 1] - 0xDC00); i++; }
+        b = cp437_from_unicode(cp);
+        if (b) out[o++] = b;
+    }
+    *n = o;
+    g_osk_outcome = 0;
+    return 1;
+}
+
+int plat_osk_active(void) { return g_osk_active; }
 
 static void wait_flip(void) {
     while (gcmGetFlipStatus() != 0) usleep(200);
@@ -318,8 +411,8 @@ static void poll_pad(void) {
         if (pressed & 16) push_key(KEY_PGUP);
         if (pressed & 32) push_key(KEY_PGDN);
         if (pressed & 64) push_key(KEY_ESC);
-        if (pressed & 128) push_key(KEY_ENTER);
-        if (pressed & 256) push_key(KEY_F1);
+        if (pressed & 128) push_key(KEY_PAD_ENTER);
+        if (pressed & 256) push_key(KEY_OSK);
         if (pressed & 512) push_key(KEY_VIEW_ART);
         if (pressed & 1024) push_key(KEY_ROOM_PREV);
         if (pressed & 2048) push_key(KEY_ROOM_NEXT);

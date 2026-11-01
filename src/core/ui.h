@@ -36,6 +36,8 @@ enum {
     KEY_TOGGLE_COMPACT,  /* pad Select */
     KEY_VIEW_ART,        /* pad Square, F3: open the art viewer */
     KEY_ROOM_NEXT, KEY_ROOM_PREV,  /* pad Right/Left, Ctrl-N/Ctrl-P: other joined rooms */
+    KEY_OSK,             /* pad Triangle: on-screen keyboard */
+    KEY_PAD_ENTER,       /* pad Cross: Enter, or the keyboard when the line is empty */
     KEY_QUIT             /* pad Start, window close */
 };
 
@@ -55,7 +57,14 @@ typedef struct {
     /* Art viewer: which piece is open (oldest = 0), -1 for none, and how
      * far it is scrolled when larger than the screen. */
     int view_art, art_dx, art_dy;
+    /* 1 while the platform's on-screen keyboard is up for our input line. */
+    int osk_open;
 } ui;
+
+/* Text the on-screen keyboard returned: becomes the input line and is
+ * sent (or, in UI_ASK_NICK mode, becomes the nickname). Same contract as
+ * ui_key for nick_out. */
+int ui_osk_result(ui *u, chat *c, const unsigned char *text, int n, long long now_ms, char *nick_out, size_t nick_cap);
 
 void ui_init(ui *u);
 void ui_set_status(ui *u, long long now_ms, long long for_ms, const char *fmt, ...);

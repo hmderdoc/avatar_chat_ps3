@@ -221,6 +221,11 @@ int plat_poll_key(void) {
 
 int plat_quit_requested(void) { return g_quit; }
 
+/* A terminal has a keyboard; there is no on-screen one here. */
+int plat_osk_open(const char *title, const unsigned char *text, int n) { (void)title; (void)text; (void)n; return -1; }
+int plat_osk_poll(unsigned char *out, int cap, int *n) { (void)out; (void)cap; *n = 0; return -1; }
+int plat_osk_active(void) { return 0; }
+
 long long plat_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);

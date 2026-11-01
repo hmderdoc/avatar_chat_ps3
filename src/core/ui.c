@@ -131,6 +131,11 @@ static int draw_name_only(screen *s, int x, int y, const chat_msg *m, unsigned c
     return x + i;
 }
 
+/* Cells the name and its tag take. */
+static int name_width(const chat_msg *m) {
+    return (int)strlen(m->name) + (m->tag[0] ? 1 + (int)strlen(m->tag) : 0);
+}
+
 /* Name plus the tag after it, as the door and the web page show it. */
 static int draw_name(screen *s, int x, int y, const chat_msg *m, unsigned char attr) {
     x = draw_name_only(s, x, y, m, attr);
@@ -265,31 +270,48 @@ static void draw_block(const ui *u, const chat *c, screen *s, const block *b, in
         return;
     }
 
-    /* Avatar mode: gutter on the left, name line, then the texts. */
+    /* Avatar mode: the gutter on the left for others, on the right for our
+     * own lines (the door's layout), then the name line and the texts. */
     {
-        int x, width = cols - GUTTER - 1;
+        int width = cols - GUTTER - 1, mine = m0->self, gx = mine ? cols - 1 - AVATAR_W : 1, tx = mine ? 1 : GUTTER;
         char age[24];
         for (k = 0; k < AVATAR_H; k++) {
             int yy = y0 + k;
             if (!ROW_OK(yy)) continue;
-            if (m0->has_avatar) avatar_row(s, 1, yy, m0->avatar, k);
-            else placeholder_row(s, 1, yy, m0->name, k);
+            if (m0->has_avatar) avatar_row(s, gx, yy, m0->avatar, k);
+            else placeholder_row(s, gx, yy, m0->name, k);
         }
         if (ROW_OK(y)) {
-            x = draw_name(s, GUTTER, y, m0, name_attr);
-            if (m0->host[0]) {
-                x = draw_text(s, x, y, " @", C_META, -1);
-                x = draw_text(s, x, y, m0->host, C_META, cols - x - 8);
-            }
             age_text(age, sizeof age, chat_msg_at(c, b->last)->time, now);
-            if (age[0]) draw_text(s, cols - 1 - (int)strlen(age), y, age, C_META, -1);
+            if (mine) {
+                /* Right-aligned: "age  name @host" ending at the gutter. */
+                int nlen = name_width(m0), hlen = m0->host[0] ? 2 + (int)strlen(m0->host) : 0, x;
+                x = gx - 1 - nlen - hlen;
+                if (x < tx + (int)strlen(age) + 2) x = tx + (int)strlen(age) + 2;
+                x = draw_name(s, x, y, m0, name_attr);
+                if (m0->host[0]) {
+                    x = draw_text(s, x, y, " @", C_META, -1);
+                    draw_text(s, x, y, m0->host, C_META, gx - 1 - x);
+                }
+                if (age[0]) draw_text(s, tx, y, age, C_META, -1);
+            } else {
+                int x = draw_name(s, GUTTER, y, m0, name_attr);
+                if (m0->host[0]) {
+                    x = draw_text(s, x, y, " @", C_META, -1);
+                    draw_text(s, x, y, m0->host, C_META, cols - x - 8);
+                }
+                if (age[0]) draw_text(s, cols - 1 - (int)strlen(age), y, age, C_META, -1);
+            }
         }
         y++;
         for (i = b->first; i <= b->last; i++) {
             const chat_msg *m = chat_msg_at(c, i);
             int n = ui_wrap(m->text, m->textlen, width, segs, MAX_SEGS);
-            for (k = 0; k < n; k++, y++)
-                if (ROW_OK(y)) raw(s, GUTTER, y, m->text + segs[k].start, segs[k].len, text_attr);
+            for (k = 0; k < n; k++, y++) {
+                if (!ROW_OK(y)) continue;
+                if (mine) raw(s, gx - 1 - segs[k].len, y, m->text + segs[k].start, segs[k].len, text_attr);
+                else raw(s, GUTTER, y, m->text + segs[k].start, segs[k].len, text_attr);
+            }
         }
     }
 #undef ROW_OK
@@ -433,14 +455,14 @@ void ui_render(ui *u, const chat *c, screen *s, long long now_ms, const char *co
     } else {
         u->status[0] = 0;
         if (u->mode == UI_ASK_NICK) {
-            draw_text(s, 1, status_y, "Type a nickname (letters, digits, - _ space; up to 25) and press Enter.", C_STATUS, cols - 2);
+            draw_text(s, 1, status_y, "Type a nickname (letters, digits, - _ space; up to 25) and press Enter. Pad: Triangle or Cross opens the keyboard.", C_STATUS, cols - 2);
         } else {
             int unviewed = chat_unviewed_art(c);
             if (unviewed > 0)
                 snprintf(tmp, sizeof tmp, "%d new art piece%s: Square or /img to view   /help commands   Start or /quit exits",
                          unviewed, unviewed == 1 ? "" : "s");
             else
-                snprintf(tmp, sizeof tmp, "Enter sends  /help commands  PgUp/PgDn scroll  %s  Start or /quit exits  %s",
+                snprintf(tmp, sizeof tmp, "Enter sends  Triangle: keyboard  /help commands  L1/R1 scroll  %s  Start quits  %s",
                          u->compact ? "Select: avatars" : "Select: compact",
                          u->scroll > 0 ? "[scrolled]" : "");
             draw_text(s, 1, status_y, tmp, C_STATUS, cols - 2);
@@ -468,6 +490,17 @@ static void open_art(ui *u, chat *c, int index) {
     u->view_art = index;
     u->art_dx = u->art_dy = 0;
     u->dirty = 1;
+}
+
+int ui_osk_result(ui *u, chat *c, const unsigned char *text, int n, long long now_ms, char *nick_out, size_t nick_cap) {
+    u->osk_open = 0;
+    u->dirty = 1;
+    if (n < 0) n = 0;
+    if (n > UI_INPUT_MAX) n = UI_INPUT_MAX;
+    memcpy(u->input, text, (size_t)n);
+    u->inlen = u->incur = n;
+    if (n == 0) return 1;
+    return ui_key(u, c, KEY_ENTER, now_ms, nick_out, nick_cap);
 }
 
 /* Keys while a piece of art is open. */
@@ -542,6 +575,8 @@ int ui_key(ui *u, chat *c, int key, long long now_ms, char *nick_out, size_t nic
         return 1;
     case KEY_TAB:
         return 1;
+    case KEY_OSK:
+        return 1; /* the main loop opens it; nothing to do in the core */
     case KEY_ENTER:
         if (u->mode == UI_ASK_NICK) {
             int i, n = u->inlen;

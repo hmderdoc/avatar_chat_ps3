@@ -35,6 +35,16 @@ int plat_poll_key(void);
 /* 1 once the system asked us to quit (XMB exit, SIGINT). */
 int plat_quit_requested(void);
 
+/* On-screen keyboard. plat_osk_open shows it with a title and the text
+ * to edit (CP437); 0 on success, -1 when there is none (host build).
+ * plat_osk_poll then returns 0 while it is open, 1 with the entered text
+ * in out (CP437, not NUL-terminated; *n set), or -1 when cancelled. The
+ * caller keeps drawing frames while it is open. */
+int plat_osk_open(const char *title, const unsigned char *text, int n);
+int plat_osk_poll(unsigned char *out, int cap, int *n);
+/* 1 while the keyboard is showing. */
+int plat_osk_active(void);
+
 long long plat_now_ms(void);
 void plat_sleep_ms(int ms);
 

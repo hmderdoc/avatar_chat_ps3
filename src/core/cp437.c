@@ -37,6 +37,12 @@ static int from_unicode(unsigned long cp) {
     return '?';
 }
 
+unsigned char cp437_from_unicode(unsigned long cp) {
+    if (cp == '\t') return ' ';
+    if (cp < 0x20 || cp == 0x7F) return 0;
+    return (unsigned char)from_unicode(cp);
+}
+
 size_t cp437_from_utf8(const char *s, size_t n, unsigned char *out, size_t cap) {
     size_t i = 0, o = 0;
     while (i < n && o < cap) {

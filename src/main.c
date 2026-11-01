@@ -148,7 +148,23 @@ int main(int argc, char **argv) {
         }
 
         nick[0] = 0;
+        if (g_ui.osk_open) {
+            unsigned char text[UI_INPUT_MAX];
+            int n = 0, rc = plat_osk_poll(text, sizeof text, &n);
+            if (rc == 1) dirty |= ui_osk_result(&g_ui, &g_chat, text, n, now, nick, sizeof nick);
+            else if (rc < 0) { g_ui.osk_open = 0; dirty = 1; }
+            dirty = 1; /* keep flipping frames under the dialog */
+        }
         while ((key = plat_poll_key()) != KEY_NONE) {
+            if (g_ui.osk_open) continue; /* the dialog has the pad */
+            if (key == KEY_OSK || (key == KEY_PAD_ENTER && g_ui.inlen == 0 && g_ui.view_art < 0)) {
+                const char *title = g_ui.mode == UI_ASK_NICK ? "Your nickname" : "Say something";
+                if (plat_osk_open(title, g_ui.input, g_ui.inlen) == 0) g_ui.osk_open = 1;
+                else ui_set_status(&g_ui, now, 3000, "No on-screen keyboard here; type on the keyboard.");
+                dirty = 1;
+                continue;
+            }
+            if (key == KEY_PAD_ENTER) key = KEY_ENTER;
             dirty |= ui_key(&g_ui, &g_chat, key, now, nick, sizeof nick);
             if (nick[0]) {
                 chat_set_identity(&g_chat, nick, cfg.system, has_avatar ? avatar : NULL);

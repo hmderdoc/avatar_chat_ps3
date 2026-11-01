@@ -318,6 +318,20 @@ static void test_wrap_and_render(void) {
         CHECK(s.cells[found * 80 + 1].ch == 0xDA && s.cells[(found + 5) * 80 + 1].ch == 0xC0);
         for (x = 0; x < 80; x++) row[x] = (char)s.cells[(found + 1) * 80 + x].ch;
         CHECK(strstr(row, "hello there") == row + 12);
+        /* Our own line: avatar frame at the right edge, text ending before it. */
+        c.connected = 1;
+        chat_input(&c, (const unsigned char *)"mine", 4);
+        ui_render(&u, &c, &s, fake_now, "online");
+        found = 0;
+        for (y = 1; y < 22 && !found; y++)
+            if (s.cells[y * 80 + 69].ch == 0xDA && s.cells[y * 80 + 78].ch == 0xBF) found = y;
+        CHECK(found > 0);
+        for (x = 0; x < 80; x++) row[x] = (char)s.cells[found * 80 + x].ch;
+        row[80] = 0;
+        CHECK(strstr(row, "SiX @PS3") && strstr(row, "SiX @PS3") + 8 == row + 68);
+        for (x = 0; x < 80; x++) row[x] = (char)s.cells[(found + 1) * 80 + x].ch;
+        CHECK(strncmp(row + 64, "mine", 4) == 0);
+        c.count = 1; /* drop it again for the checks below */
         /* Typing goes to the input row; Enter sends. */
         ui_key(&u, &c, 'h', fake_now, NULL, 0);
         ui_key(&u, &c, 'i', fake_now, NULL, 0);
@@ -344,6 +358,18 @@ static void test_wrap_and_render(void) {
             char nick[32] = "";
             ui_key(&u, &c, KEY_ENTER, fake_now, nick, sizeof nick);
             CHECK(strcmp(nick, "a") == 0 && u.mode == UI_CHAT);
+        }
+        /* The on-screen keyboard's text goes out like a typed line. */
+        outlen = 0;
+        c.connected = 1;
+        u.osk_open = 1;
+        ui_osk_result(&u, &c, (const unsigned char *)"from the osk", 12, fake_now, NULL, 0);
+        CHECK(u.osk_open == 0 && u.inlen == 0 && strstr(outbox, "\"str\":\"from the osk\""));
+        ui_init(&u);
+        {
+            char nick[32] = "";
+            ui_osk_result(&u, &c, (const unsigned char *)"PadUser", 7, fake_now, nick, sizeof nick);
+            CHECK(strcmp(nick, "PadUser") == 0 && u.mode == UI_CHAT);
         }
     }
 }

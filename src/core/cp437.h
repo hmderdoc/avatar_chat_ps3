@@ -15,6 +15,10 @@ size_t cp437_from_utf8(const char *s, size_t n, unsigned char *out, size_t cap);
  * NUL. Returns the length written. 0x00 becomes a space. */
 size_t cp437_to_utf8(const unsigned char *s, size_t n, char *out, size_t cap);
 
+/* One Unicode code point to the nearest CP437 byte ('?' when none); 0 for
+ * control characters that should be dropped. */
+unsigned char cp437_from_unicode(unsigned long cp);
+
 /* One CP437 byte to UTF-8; returns the byte count (1-3), writes no NUL. */
 size_t cp437_byte_to_utf8(unsigned char b, char out[4]);
 
