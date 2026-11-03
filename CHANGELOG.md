@@ -4,6 +4,20 @@ Releases are cut from the Actions tab (release > Run workflow with the
 version), which builds the `.pkg` and publishes the matching section of
 this file as the release notes.
 
+## v0.3.0-alpha.2
+
+### Fixed
+
+- **No keyboard opened on Triangle or Cross** (alpha.1 of 0.3). The
+  system dialog request could end with nothing shown and no fallback,
+  and while it was pending every key was swallowed. The built-in pad
+  keyboard is now the default (`osk = builtin`); `osk = system` tries
+  the console's dialog first, and a dialog that fails, closes without
+  text or stays invisible hands over to the built-in keyboard, as does
+  pressing Triangle, Circle or Start while it is pending. F4 on a USB
+  keyboard opens the pad keyboard too. The log now records pad
+  connections and the first button presses.
+
 ## v0.3.0-alpha.1
 
 The rest of the door's transcript features, and a keyboard that needs no

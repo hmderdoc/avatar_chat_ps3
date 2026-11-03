@@ -60,7 +60,7 @@ those), uploads.
 | --- | --- |
 | USB keyboard | Type; **Enter** sends; **Esc** clears the line; **PgUp / PgDn** and **Up / Down** scroll; **F1** help; **F2** compact view; **F3** art viewer. |
 | Pad **Cross** | Enter: sends the line. On an empty line, opens the on-screen keyboard. |
-| Pad **Triangle** | Keyboard: the system's on-screen one, or the built-in pad keyboard when that fails or `osk = builtin`. Its Enter/Start sends. |
+| Pad **Triangle** | Keyboard: the built-in pad keyboard (default), or the console's on-screen dialog with `osk = system`, which falls back to the built-in one if it fails. F4 on a USB keyboard opens it too. |
 | Built-in keyboard | D-pad moves, Cross types, Square backspace, Triangle space, L1/R1 shift, Start sends, Circle closes. A USB keyboard still types while it is up. |
 | Pad **Circle** | Clear the line; close the art viewer. |
 | Pad **Square** | Art viewer: the newest unseen piece. Left/Right page through them. |

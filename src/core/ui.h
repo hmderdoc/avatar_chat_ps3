@@ -32,7 +32,7 @@ enum {
     KEY_NONE = 0,
     KEY_ENTER = 0x1000, KEY_BACKSPACE, KEY_DELETE, KEY_ESC, KEY_TAB,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_PGUP, KEY_PGDN, KEY_HOME, KEY_END,
-    KEY_F1, KEY_F2, KEY_F3,
+    KEY_F1, KEY_F2, KEY_F3, KEY_F4,
     KEY_TOGGLE_COMPACT,  /* pad Select */
     KEY_VIEW_ART,        /* pad Square, F3: open the art viewer */
     KEY_ROOM_NEXT, KEY_ROOM_PREV,  /* pad Right/Left, Ctrl-N/Ctrl-P: other joined rooms */

@@ -192,6 +192,7 @@ int plat_poll_key(void) {
                     case 'P': return KEY_F1;
                     case 'Q': return KEY_F2;
                     case 'R': return KEY_F3;
+                    case 'S': return KEY_OSK;
                     case '~':
                         switch (num) {
                         case 1: case 7: return KEY_HOME;
@@ -202,6 +203,7 @@ int plat_poll_key(void) {
                         case 11: return KEY_F1;
                         case 12: return KEY_F2;
                         case 13: return KEY_F3;
+                        case 14: return KEY_OSK;
                         default: return KEY_NONE;
                         }
                     default: return KEY_NONE;

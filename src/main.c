@@ -375,8 +375,18 @@ int main(int argc, char **argv) {
             unsigned char text[UI_INPUT_MAX];
             int n = 0, rc = plat_osk_poll(text, sizeof text, &n);
             if (rc == 1) dirty |= ui_osk_result(&g_ui, &g_chat, text, n, now, nick, sizeof nick);
-            else if (rc < 0) { g_ui.osk_open = 0; dirty = 1; }
-            else if (!plat_osk_shown() && now - g_osk_opened > 6000) {
+            else if (rc < 0) {
+                /* The dialog closed without text: cancelled, or it never worked.
+                 * A quick failure means it is broken here; use ours from now on. */
+                g_ui.osk_open = 0;
+                if (now - g_osk_opened < 1500 || !plat_osk_shown()) {
+                    cfg.osk = 2;
+                    plat_log("system keyboard failed; using the built-in one");
+                    ui_set_status(&g_ui, now, 4000, "System keyboard failed; using the built-in one.");
+                    ui_open_pad_keyboard(&g_ui);
+                }
+                dirty = 1;
+            } else if (!plat_osk_shown() && now - g_osk_opened > 6000) {
                 /* The dialog never came up: give up on it for this run and
                  * use the built-in keyboard instead. */
                 plat_osk_abort();
@@ -389,7 +399,20 @@ int main(int argc, char **argv) {
             dirty = 1; /* keep flipping frames under the dialog */
         }
         while ((key = plat_poll_key()) != KEY_NONE) {
-            if (g_ui.osk_open) continue; /* the dialog has the pad */
+            if (g_ui.osk_open) {
+                /* The dialog should have the pad; if we still see presses it
+                 * is not really up. Triangle, Circle or Start take over. */
+                if (key == KEY_OSK || key == KEY_ESC || key == KEY_QUIT) {
+                    plat_osk_abort();
+                    g_ui.osk_open = 0;
+                    cfg.osk = 2;
+                    plat_log("system keyboard abandoned by the user; using the built-in one");
+                    ui_set_status(&g_ui, now, 4000, "Using the built-in keyboard.");
+                    ui_open_pad_keyboard(&g_ui);
+                    dirty = 1;
+                }
+                continue;
+            }
             if (!g_ui.kb_open && (key == KEY_OSK || (key == KEY_PAD_ENTER && g_ui.inlen == 0 && g_ui.view_art < 0))) {
                 const char *title = g_ui.mode == UI_ASK_NICK ? "Your nickname" : "Say something";
                 if (cfg.osk == 1 && plat_osk_open(title, g_ui.input, g_ui.inlen) == 0) {

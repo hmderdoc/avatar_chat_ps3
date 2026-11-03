@@ -369,6 +369,7 @@ static int raw_to_key(u16 code) {
     case KB_RAWKEY_F1: return KEY_F1;
     case KB_RAWKEY_F2: return KEY_F2;
     case KB_RAWKEY_F3: return KEY_F3;
+    case KB_RAWKEY_F4: return KEY_OSK;
     default: return KEY_NONE;
     }
 }
@@ -413,11 +414,14 @@ static void poll_keyboard(void) {
 
 static void poll_pad(void) {
     static u32 prev;
+    static int seen_pads = -1;
     padInfo info;
     padData pad;
-    int i;
+    int i, connected = 0;
     u32 now = 0;
     if (ioPadGetInfo(&info) != 0) return;
+    for (i = 0; i < MAX_PADS; i++) if (info.status[i]) connected++;
+    if (connected != seen_pads) { plat_log("pad: %d connected", connected); seen_pads = connected; }
     for (i = 0; i < MAX_PADS; i++) {
         if (!info.status[i]) continue;
         if (ioPadGetData(i, &pad) != 0) continue;
@@ -435,8 +439,10 @@ static void poll_pad(void) {
         if (pad.BTN_RIGHT) now |= 2048;
     }
     {
+        static int logged;
         u32 pressed = now & ~prev;
         prev = now;
+        if (pressed && logged < 8) { plat_log("pad: buttons 0x%x", (unsigned)pressed); logged++; }
         if (pressed & 1) push_key(KEY_QUIT);
         if (pressed & 2) push_key(KEY_TOGGLE_COMPACT);
         if (pressed & 4) push_key(KEY_UP);
